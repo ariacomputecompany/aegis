@@ -966,6 +966,7 @@ void AegisPumpBrowserHostWindow() {
   }
 
   [NSApp updateWindows];
+  (void)AegisRunScheduledCefMessagePumpWorkIfDue();
 }
 
 bool AegisBrowserHostWindowCloseRequested() {

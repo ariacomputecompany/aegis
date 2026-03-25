@@ -42,6 +42,12 @@ void AegisSetBrowserHostNavigationState(bool can_go_back,
                                         bool is_loading);
 void AegisAttachBrowserToHostWindow(CefRefPtr<CefBrowser> browser);
 void AegisCloseBrowserHostWindow();
+void AegisScheduleCefMessagePumpWork(int64_t delay_ms);
+bool AegisRunScheduledCefMessagePumpWorkIfDue();
+int64_t AegisNextScheduledCefWorkDelayMs();
+void AegisResetCefMessagePumpScheduler();
+void AegisRunApplicationMessageLoop();
+void AegisStopApplicationMessageLoop();
 void AegisPumpBrowserHostWindow();
 bool AegisBrowserHostWindowCloseRequested();
 

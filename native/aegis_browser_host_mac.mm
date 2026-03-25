@@ -35,7 +35,7 @@ void AegisConfigureCefSettings(const AegisCefBootstrapOptions& options,
 #if !defined(CEF_USE_SANDBOX)
   settings->no_sandbox = true;
 #endif
-  settings->windowless_rendering_enabled = true;
+  settings->windowless_rendering_enabled = options.headless;
   settings->command_line_args_disabled = false;
   settings->external_message_pump = options.external_message_pump;
 

@@ -52,7 +52,7 @@ thread_local std::string g_last_host_error;
 constexpr auto kStartupTimeout = std::chrono::seconds(30);
 constexpr auto kRendererTimeout = std::chrono::seconds(30);
 constexpr auto kShutdownTimeout = std::chrono::seconds(2);
-constexpr auto kPumpInterval = std::chrono::milliseconds(10);
+constexpr auto kMaxPumpSleepInterval = std::chrono::milliseconds(10);
 constexpr char kBootstrapUrl[] =
     "data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E";
 
@@ -812,7 +812,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     if (!options_.headless && AegisBrowserHostWindowCloseRequested()) {
       throw std::runtime_error("browser window closed by user");
     }
-    CefDoMessageLoopWork();
     return {};
   }
 
@@ -1047,8 +1046,15 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       }
 
       AegisPumpBrowserHostWindow();
-      CefDoMessageLoopWork();
-      std::this_thread::sleep_for(kPumpInterval);
+      const auto next_delay_ms = AegisNextScheduledCefWorkDelayMs();
+      if (next_delay_ms == 0) {
+        continue;
+      }
+      const auto sleep_for =
+          next_delay_ms > 0
+              ? std::min(kMaxPumpSleepInterval, std::chrono::milliseconds(next_delay_ms))
+              : kMaxPumpSleepInterval;
+      std::this_thread::sleep_for(sleep_for);
     }
   }
 
@@ -1174,6 +1180,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     } catch (const std::exception& error) {
       AppendDebugLog(std::string("host: startup_error ") + error.what());
       if (cef_initialized_) {
+        AegisResetCefMessagePumpScheduler();
         CefShutdown();
         cef_unload_library();
         cef_initialized_ = false;
@@ -1208,6 +1215,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         PumpUntil([this]() { return browser_closed_ || browser_.get() == nullptr; }, deadline,
                   "timed out waiting for browser shutdown");
       }
+      AegisResetCefMessagePumpScheduler();
       CefShutdown();
       cef_unload_library();
       cef_initialized_ = false;
@@ -1241,7 +1249,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       ApplyAegisProductionPreferences(request_context_);
 
       CefBrowserSettings settings;
-      settings.windowless_frame_rate = 30;
 
       client_ = new AegisHostClient(options_.headless,
                                     static_cast<::AegisClientDelegate*>(this), this);
@@ -1249,6 +1256,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                                                           : options_.start_url;
 
       if (options_.headless) {
+        settings.windowless_frame_rate = 30;
         CefWindowInfo window_info;
         window_info.SetAsWindowless(kNullWindowHandle);
         window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
@@ -1337,7 +1345,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     RequireOwnerThread();
     SetOperationStage("reading current browser url");
     AegisPumpBrowserHostWindow();
-    CefDoMessageLoopWork();
     std::lock_guard lock(mutex_);
     return current_url_;
   }

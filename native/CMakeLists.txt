@@ -46,6 +46,7 @@ set(AEGIS_NATIVE_SOURCES
   aegis_client.cc
   aegis_state_paths.h
   aegis_state_paths.cc
+  aegis_message_pump_mac.mm
   aegis_browser_host_mac.mm
   aegis_native_mac.mm
   src/aegis_protocol.cpp
@@ -56,6 +57,7 @@ set(AEGIS_NATIVE_HELPER_SOURCES
   process_helper_mac.cc
   aegis_app.cc
   aegis_client.cc
+  aegis_message_pump_mac.mm
 )
 
 set(AEGIS_HOST_LIBRARY_SOURCES
@@ -105,6 +107,7 @@ add_library(${AEGIS_SHARED_SUPPORT_TARGET} STATIC
   aegis_app.cc
   aegis_client.cc
   aegis_state_paths.cc
+  aegis_message_pump_mac.mm
   aegis_browser_host_mac.mm
 )
 add_dependencies(${AEGIS_SHARED_SUPPORT_TARGET} aegis_runtime_header)

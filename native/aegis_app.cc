@@ -7,6 +7,7 @@
 
 #include "aegis_client.h"
 #include "aegis_messages.h"
+#include "aegis_native_mac.h"
 #include "aegis_state_paths.h"
 #include "build-xcode/generated/aegis_runtime_script.h"
 #if defined(AEGIS_STANDALONE_APP)
@@ -689,7 +690,9 @@ bool AegisApp::OnAlreadyRunningAppRelaunch(
 #endif
 }
 
-void AegisApp::OnScheduleMessagePumpWork(int64_t) {}
+void AegisApp::OnScheduleMessagePumpWork(int64_t delay_ms) {
+  AegisScheduleCefMessagePumpWork(delay_ms);
+}
 
 void AegisApp::CreateHeadfulBrowser(const std::string& url) {
 #if !defined(AEGIS_STANDALONE_APP)
@@ -706,7 +709,6 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
   ApplyAegisProductionPreferences(request_context_);
 
   CefBrowserSettings settings;
-  settings.windowless_frame_rate = 30;
 
   CefRefPtr<AegisClient> client(new AegisClient(false, this));
   CefWindowInfo window_info;
@@ -736,11 +738,11 @@ void AegisApp::OnContextInitialized() {
   AppendDebugLog("app: on_context_initialized url=" + url);
 
   CefBrowserSettings settings;
-  settings.windowless_frame_rate = 30;
 
   CefRefPtr<AegisClient> client(new AegisClient(headless, this));
 
   if (headless) {
+    settings.windowless_frame_rate = 30;
     if (!request_context_) {
       CefRequestContextSettings request_context_settings;
       request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
@@ -880,7 +882,7 @@ void AegisApp::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 #if defined(AEGIS_STANDALONE_APP)
     AegisRemoveRuntimeSession(runtime_session_paths_);
     AegisCloseBrowserHostWindow();
-    CefQuitMessageLoop();
+    AegisStopApplicationMessageLoop();
 #endif
   }
 }

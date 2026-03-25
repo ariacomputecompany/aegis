@@ -121,7 +121,7 @@ int main(int argc, char* argv[]) {
     CefRefPtr<AegisApp> app(new AegisApp(!embedded_command_mode, startup_url));
     AegisCefBootstrapOptions bootstrap_options;
     bootstrap_options.headless = embedded_command_mode && !headful_mode;
-    bootstrap_options.external_message_pump = embedded_command_mode;
+    bootstrap_options.external_message_pump = true;
     int subprocess_exit_code = -1;
     std::string initialize_error;
     append_debug("main: before canonical cef bootstrap");
@@ -219,7 +219,8 @@ int main(int argc, char* argv[]) {
       std::_Exit(exit_code);
     }
 
-    CefRunMessageLoop();
+    AegisRunApplicationMessageLoop();
+    AegisResetCefMessagePumpScheduler();
     CefShutdown();
   }
 
