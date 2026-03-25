@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from statistics import median
@@ -30,33 +31,84 @@ def http_post_json(url: str, payload: dict, timeout: float) -> dict:
         return json.loads(response.read().decode())
 
 
-def wait_for_runtime(base_url: str, timeout_s: float) -> tuple[float, dict, int]:
+def http_ready_json(base_url: str, timeout: float) -> dict:
+    with urllib.request.urlopen(f"{base_url}/readyz", timeout=timeout) as response:
+        return json.loads(response.read().decode())
+
+
+def wait_for_command_ready(base_url: str, timeout_s: float) -> tuple[float, dict, int]:
     started = time.time()
     attempts = 0
     while time.time() - started < timeout_s:
         attempts += 1
         try:
-            runtime = http_get_json(f"{base_url}/runtime", timeout=1.0)
-            return time.time() - started, runtime, attempts
+            diagnostics = http_ready_json(base_url, timeout=1.0)
+            return time.time() - started, diagnostics, attempts
+        except urllib.error.HTTPError as error:
+            if error.code != 503:
+                raise
+            time.sleep(0.05)
         except Exception:
             time.sleep(0.05)
-    raise TimeoutError("runtime did not become ready in time")
+    raise TimeoutError("runtime did not become command-ready in time")
 
 
-def watch_ready_banner(stream, started_at: float, result: dict) -> None:
-    if stream is None:
+def build_release_binary(root: Path) -> Path:
+    subprocess.run(
+        ["cargo", "build", "--release", "--bin", "aegis"],
+        cwd=root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    workspace_release = root / "target" / "aarch64-apple-darwin" / "release" / "aegis"
+    workspace_default_release = root / "target" / "release" / "aegis"
+    if workspace_release.exists():
+        return workspace_release
+    if workspace_default_release.exists():
+        return workspace_default_release
+    raise FileNotFoundError("release aegis binary was not produced by cargo build --release")
+
+
+def resolve_host_library(root: Path, configured: str | None) -> str:
+    if configured:
+        return configured
+    installed_host_lib = (
+        Path.home()
+        / "Applications"
+        / "Aegis.app"
+        / "Contents"
+        / "Frameworks"
+        / "libaegis_host.dylib"
+    )
+    workspace_host_lib = root / "native" / "build-xcode" / "Release" / "libaegis_host.dylib"
+    if installed_host_lib.exists():
+        return str(installed_host_lib)
+    return str(workspace_host_lib)
+
+
+def watch_ready_banner(log_path: str, started_at: float, result: dict) -> None:
+    path = Path(log_path)
+    deadline = time.time() + 60.0
+    position = 0
+    if not log_path:
         return
     try:
-        for line in iter(stream.readline, ""):
-            if "Aegis serve ready on http://" in line:
-                result["serve_ready_banner_ms"] = round((time.time() - started_at) * 1000, 1)
-                result["serve_ready_banner_line"] = line.strip()
-                break
-    finally:
-        try:
-            stream.close()
-        except Exception:
-            pass
+        while time.time() < deadline:
+            if not path.exists():
+                time.sleep(0.05)
+                continue
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(position)
+                for line in handle:
+                    if "Aegis serve ready on http://" in line:
+                        result["serve_ready_banner_ms"] = round((time.time() - started_at) * 1000, 1)
+                        result["serve_ready_banner_line"] = line.strip()
+                        return
+                position = handle.tell()
+            time.sleep(0.05)
+    except Exception:
+        return
 
 
 def ensure_port_free(host: str, port: int) -> None:
@@ -78,55 +130,42 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Measure Aegis cold-start and first-command latency.")
     parser.add_argument("--addr", default="127.0.0.1:7915")
     parser.add_argument("--mode", choices=("headless", "headful"), default="headless")
-    parser.add_argument(
-        "--start-url",
-        default="data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3EAegis%20Bootstrap%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E",
-    )
-    parser.add_argument("--host-lib", default="native/build-xcode/Release/libaegis_host.dylib")
-    parser.add_argument("--timeout", type=float, default=20.0)
-    parser.add_argument("--debug-log", default="/tmp/aegis-measure-startup.log")
+    parser.add_argument("--start-url")
+    parser.add_argument("--host-lib")
+    parser.add_argument("--profile", default="measure-startup")
+    parser.add_argument("--timeout", type=float, default=45.0)
+    parser.add_argument("--debug-log")
     parser.add_argument("--samples", type=int, default=1)
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
-    installed_cli = (
-        Path.home()
-        / "Applications"
-        / "Aegis.app"
-        / "Contents"
-        / "MacOS"
-        / "aegis_cli"
-    )
-    binary = (
-        installed_cli
-        if installed_cli.exists()
-        else root / "target" / "aarch64-apple-darwin" / "release" / "aegis"
-    )
+    binary = build_release_binary(root)
+    host_lib = resolve_host_library(root, args.host_lib)
     base_url = f"http://{args.addr}"
     host, port_text = args.addr.rsplit(":", 1)
     ensure_port_free(host, int(port_text))
 
     env = os.environ.copy()
-    env["AEGIS_DEBUG_LOG"] = args.debug_log
     env["AEGIS_WORKSPACE_ROOT"] = str(root)
-    env["AEGIS_BUNDLED_CLI"] = "1"
 
     command = [
         str(binary),
+        "--profile",
+        args.profile,
         "--mode",
         args.mode,
-        "--start-url",
-        args.start_url,
         "--host-lib",
-        args.host_lib,
+        host_lib,
         "serve",
         "--addr",
         args.addr,
     ]
+    if args.start_url:
+        command[1:1] = ["--start-url", args.start_url]
 
     def run_sample(sample_index: int) -> dict:
         debug_log = args.debug_log
-        if args.samples > 1:
+        if debug_log and args.samples > 1:
             debug_path = Path(args.debug_log)
             debug_log = str(
                 debug_path.with_name(
@@ -135,29 +174,40 @@ def main() -> int:
             )
 
         sample_env = env.copy()
-        sample_env["AEGIS_DEBUG_LOG"] = debug_log
+        if debug_log:
+            sample_env["AEGIS_DEBUG_LOG"] = debug_log
+        sanitized_addr = args.addr.replace(":", "-")
+        server_log = str(
+            root / "tmp" / f"measure-startup-{args.mode}-{sanitized_addr}-{sample_index + 1}.log"
+        )
+        Path(server_log).parent.mkdir(parents=True, exist_ok=True)
+        Path(server_log).write_text("", encoding="utf-8")
 
         launch_started_at = time.time()
-        process = subprocess.Popen(
-            command,
-            cwd=root,
-            env=sample_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        with open(server_log, "a", encoding="utf-8") as server_stream:
+            process = subprocess.Popen(
+                command,
+                cwd=root,
+                env=sample_env,
+                stdout=server_stream,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
         started_at = time.time()
         banner_info: dict[str, object] = {}
         banner_thread = threading.Thread(
             target=watch_ready_banner,
-            args=(process.stderr, started_at, banner_info),
+            args=(server_log, started_at, banner_info),
             daemon=True,
         )
         banner_thread.start()
 
         try:
-            runtime_ready_s, runtime_before, runtime_attempts = wait_for_runtime(base_url, args.timeout)
+            runtime_ready_s, readiness_before, runtime_attempts = wait_for_command_ready(
+                base_url, args.timeout
+            )
+            runtime_before = http_get_json(f"{base_url}/runtime", timeout=1.0)
 
             first_command_started = time.time()
             first_execute = http_post_json(
@@ -178,10 +228,12 @@ def main() -> int:
                 "runtime_ready_ms": round(runtime_ready_s * 1000, 1),
                 "runtime_poll_attempts": runtime_attempts,
                 "first_command_ms": round(first_command_s * 1000, 1),
+                "readiness_before": readiness_before,
                 "runtime_before": runtime_before,
                 "first_execute": first_execute,
                 "runtime_after": runtime_after,
                 "debug_log": debug_log,
+                "server_log": server_log,
             }
             report.update(banner_info)
             return report
