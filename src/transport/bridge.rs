@@ -80,7 +80,21 @@ pub struct HostFunctionTable {
     pub drain_events: HostApi,
     pub navigate: HostApi,
     pub pump: HostApi,
+    pub snapshot_chrome_state: HostApi,
+    pub go_back: HostApi,
+    pub go_forward: HostApi,
+    pub reload_page: HostApi,
+    pub stop_load: HostApi,
     pub free_buffer: HostFree,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BrowserChromeState {
+    pub title: String,
+    pub url: String,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub is_loading: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,6 +211,54 @@ impl CefBridge {
         match &mut self.backend {
             BridgeBackend::Dynamic { host, fns } => {
                 let _ = Self::invoke_raw(*host, *fns, fns.pump, &[])?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn snapshot_chrome_state(&mut self) -> Result<BrowserChromeState, AegisError> {
+        match &mut self.backend {
+            BridgeBackend::Dynamic { host, fns } => {
+                let raw = Self::invoke_raw(*host, *fns, fns.snapshot_chrome_state, &[])?;
+                if raw.is_empty() {
+                    return Ok(BrowserChromeState::default());
+                }
+                serde_json::from_slice(&raw).map_err(AegisError::Deserialize)
+            }
+        }
+    }
+
+    pub fn go_back(&mut self) -> Result<(), AegisError> {
+        match &mut self.backend {
+            BridgeBackend::Dynamic { host, fns } => {
+                let _ = Self::invoke_raw(*host, *fns, fns.go_back, &[])?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn go_forward(&mut self) -> Result<(), AegisError> {
+        match &mut self.backend {
+            BridgeBackend::Dynamic { host, fns } => {
+                let _ = Self::invoke_raw(*host, *fns, fns.go_forward, &[])?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn reload_page(&mut self) -> Result<(), AegisError> {
+        match &mut self.backend {
+            BridgeBackend::Dynamic { host, fns } => {
+                let _ = Self::invoke_raw(*host, *fns, fns.reload_page, &[])?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn stop_load(&mut self) -> Result<(), AegisError> {
+        match &mut self.backend {
+            BridgeBackend::Dynamic { host, fns } => {
+                let _ = Self::invoke_raw(*host, *fns, fns.stop_load, &[])?;
                 Ok(())
             }
         }

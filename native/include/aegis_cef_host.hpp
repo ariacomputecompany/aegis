@@ -24,6 +24,11 @@ class CefHost {
   virtual std::vector<std::uint8_t> DrainEvents(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> Navigate(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> Pump(const std::vector<std::uint8_t>& request) = 0;
+  virtual std::vector<std::uint8_t> SnapshotChromeState(const std::vector<std::uint8_t>& request) = 0;
+  virtual std::vector<std::uint8_t> GoBack(const std::vector<std::uint8_t>& request) = 0;
+  virtual std::vector<std::uint8_t> GoForward(const std::vector<std::uint8_t>& request) = 0;
+  virtual std::vector<std::uint8_t> ReloadPage(const std::vector<std::uint8_t>& request) = 0;
+  virtual std::vector<std::uint8_t> StopLoad(const std::vector<std::uint8_t>& request) = 0;
 };
 
 AegisHostFunctionTable ExportFunctionTable();

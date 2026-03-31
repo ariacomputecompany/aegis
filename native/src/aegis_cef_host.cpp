@@ -317,6 +317,16 @@ struct BrowserOptions {
   std::string start_url = kBootstrapUrl;
 };
 
+std::pair<int, int> PopupWindowSize(const CefPopupFeatures& popup_features) {
+  const int width = popup_features.widthSet && popup_features.width > 0
+                        ? popup_features.width
+                        : 520;
+  const int height = popup_features.heightSet && popup_features.height > 0
+                         ? popup_features.height
+                         : 720;
+  return {std::max(420, width), std::max(320, height)};
+}
+
 BrowserOptions ParseBrowserOptions(const std::vector<std::uint8_t>& bytes) {
   BrowserOptions options;
   if (bytes.empty()) {
@@ -571,8 +581,10 @@ class AegisHostClient final : public AegisClient {
  public:
   AegisHostClient(bool headless,
                   ::AegisClientDelegate* delegate,
-                  AegisCefHost* host)
-      : AegisClient(headless, delegate), host_(host) {}
+                  AegisCefHost* host,
+                  AegisBrowserHostWindowToken window_token,
+                  bool is_popup)
+      : AegisClient(headless, delegate, window_token, is_popup), host_(host) {}
 
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                                 CefRefPtr<CefFrame> frame,
@@ -809,40 +821,143 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     static_cast<void>(request);
     RequireOwnerThread();
     AegisPumpBrowserHostWindow();
-    if (!options_.headless && AegisBrowserHostWindowCloseRequested()) {
-      throw std::runtime_error("browser window closed by user");
+    return {};
+  }
+
+  std::vector<std::uint8_t> SnapshotChromeState(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    AegisPumpBrowserHostWindow();
+    std::lock_guard lock(mutex_);
+    std::string json = "{\"title\":";
+    json += "\"" + EscapeJsonString(current_title_) + "\"";
+    json += ",\"url\":";
+    json += "\"" + EscapeJsonString(current_url_) + "\"";
+    json += ",\"can_go_back\":";
+    json += can_go_back_ ? "true" : "false";
+    json += ",\"can_go_forward\":";
+    json += can_go_forward_ ? "true" : "false";
+    json += ",\"is_loading\":";
+    json += is_loading_ ? "true" : "false";
+    json += "}";
+    return std::vector<std::uint8_t>(json.begin(), json.end());
+  }
+
+  std::vector<std::uint8_t> GoBack(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    if (browser_.get() && browser_->CanGoBack()) {
+      browser_->GoBack();
     }
     return {};
   }
 
-  void OnPrimaryBrowserCreated(CefRefPtr<CefBrowser> browser) override {
+  std::vector<std::uint8_t> GoForward(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    if (browser_.get() && browser_->CanGoForward()) {
+      browser_->GoForward();
+    }
+    return {};
+  }
+
+  std::vector<std::uint8_t> ReloadPage(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    if (browser_.get()) {
+      browser_->Reload();
+    }
+    return {};
+  }
+
+  std::vector<std::uint8_t> StopLoad(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    if (browser_.get()) {
+      browser_->StopLoad();
+    }
+    return {};
+  }
+
+  bool OnBeforePopup(CefRefPtr<CefBrowser>,
+                     CefRefPtr<CefFrame>,
+                     int,
+                     const CefString&,
+                     const CefString&,
+                     CefLifeSpanHandler::WindowOpenDisposition,
+                     bool,
+                     const CefPopupFeatures& popup_features,
+                     CefWindowInfo& window_info,
+                     CefRefPtr<CefClient>& client,
+                     CefBrowserSettings& settings,
+                     CefRefPtr<CefDictionaryValue>&,
+                     bool* no_javascript_access) override {
+    if (options_.headless) {
+      return false;
+    }
+    if (no_javascript_access != nullptr) {
+      *no_javascript_access = false;
+    }
+    const auto popup_size = PopupWindowSize(popup_features);
+    const auto window_token =
+        AegisCreateBrowserHostWindow("Aegis", popup_size.first, popup_size.second);
+    client = new AegisHostClient(false, static_cast<::AegisClientDelegate*>(this), this,
+                                 window_token, true);
+    window_info.SetAsChild(AegisGetBrowserHostWindowView(window_token),
+                           CefRect(0, 0, popup_size.first, popup_size.second));
+    window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+    settings.windowless_frame_rate = 0;
+    return false;
+  }
+
+  void OnBeforePopupAborted(CefRefPtr<CefBrowser>, int) override {}
+
+  void OnClientBrowserCreated(CefRefPtr<CefBrowser> browser,
+                              AegisBrowserHostWindowToken window_token,
+                              bool is_popup) override {
     AppendDebugLog("host: on_browser_created");
     {
       std::lock_guard lock(mutex_);
-      browser_ = browser;
-      request_context_ = browser->GetHost()->GetRequestContext();
-      page_ready_ = false;
-      renderer_ready_ = false;
-      runtime_installed_ = false;
+      browsers_[browser->GetIdentifier()] = browser;
+      browser_window_tokens_[browser->GetIdentifier()] = window_token;
+      if (!is_popup) {
+        browser_ = browser;
+        request_context_ = browser->GetHost()->GetRequestContext();
+        page_ready_ = false;
+        renderer_ready_ = false;
+        runtime_installed_ = false;
+        browser_closed_ = false;
+        closed_by_user_ = false;
+      }
       if (auto frame = browser->GetMainFrame(); frame.get()) {
-        current_url_ = frame->GetURL().ToString();
+        if (!is_popup) {
+          current_url_ = frame->GetURL().ToString();
+        }
       }
       cv_.notify_all();
     }
-    if (!options_.headless && browser) {
-      AegisSetBrowserHostAddress(browser->GetMainFrame()->GetURL().ToString());
-      AegisSetBrowserHostNavigationState(browser->CanGoBack(), browser->CanGoForward(),
-                                         browser->IsLoading());
-      AegisAttachBrowserToHostWindow(browser);
-      AegisShowBrowserHostWindow();
+    if (!options_.headless && browser && window_token != 0) {
+      AegisSetBrowserHostAddress(window_token,
+                                 browser->GetMainFrame()->GetURL().ToString());
+      AegisSetBrowserHostNavigationState(window_token, browser->CanGoBack(),
+                                         browser->CanGoForward(), browser->IsLoading());
+      AegisAttachBrowserToHostWindow(window_token, browser);
+      AegisShowBrowserHostWindow(window_token);
     }
   }
 
-  void OnBeforeBrowse(CefRefPtr<CefBrowser>,
+  void OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                       CefRefPtr<CefFrame>,
                       CefRefPtr<CefRequest>) override {
     AppendDebugLog("host: on_before_browse");
     std::lock_guard lock(mutex_);
+    if (!browser_.get() || !browser->IsSame(browser_)) {
+      return;
+    }
     page_ready_ = false;
     renderer_ready_ = false;
     runtime_installed_ = false;
@@ -851,20 +966,27 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool is_loading) override {
     AppendDebugLog(std::string("host: on_loading_state_change loading=") +
                    (is_loading ? "true" : "false"));
+    AegisBrowserHostWindowToken window_token = 0;
     {
       std::lock_guard lock(mutex_);
-      if (!browser_.get() || !browser->IsSame(browser_)) {
-        return;
+      auto it = browser_window_tokens_.find(browser->GetIdentifier());
+      if (it != browser_window_tokens_.end()) {
+        window_token = it->second;
       }
-      page_ready_ = !is_loading;
-      if (!is_loading) {
-        current_url_ = browser->GetMainFrame()->GetURL().ToString();
+      if (browser_.get() && browser->IsSame(browser_)) {
+        page_ready_ = !is_loading;
+        if (!is_loading) {
+          current_url_ = browser->GetMainFrame()->GetURL().ToString();
+        }
+        cv_.notify_all();
       }
-      cv_.notify_all();
+      can_go_back_ = browser->CanGoBack();
+      can_go_forward_ = browser->CanGoForward();
+      is_loading_ = is_loading;
     }
-    if (!options_.headless && browser) {
-      AegisSetBrowserHostNavigationState(browser->CanGoBack(), browser->CanGoForward(),
-                                         is_loading);
+    if (!options_.headless && browser && window_token != 0) {
+      AegisSetBrowserHostNavigationState(window_token, browser->CanGoBack(),
+                                         browser->CanGoForward(), is_loading);
     }
   }
 
@@ -883,40 +1005,70 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     current_url_ = frame->GetURL().ToString();
   }
 
-  void OnAddressChange(CefRefPtr<CefBrowser>,
+  void OnAddressChange(CefRefPtr<CefBrowser> browser,
                        CefRefPtr<CefFrame> frame,
                        const CefString& url) override {
-    if (options_.headless || !frame.get() || !frame->IsMain()) {
+    if (!frame.get() || !frame->IsMain()) {
       return;
     }
-    AegisSetBrowserHostAddress(url.ToString());
-  }
-
-  void OnTitleChange(CefRefPtr<CefBrowser>,
-                     const CefString& title) override {
+    std::lock_guard lock(mutex_);
+    current_url_ = url.ToString();
     if (options_.headless) {
       return;
     }
-    AegisSetBrowserHostTitle(title.ToString());
+    auto it = browser_window_tokens_.find(browser->GetIdentifier());
+    if (it != browser_window_tokens_.end()) {
+      AegisSetBrowserHostAddress(it->second, url.ToString());
+    }
+  }
+
+  void OnTitleChange(CefRefPtr<CefBrowser> browser,
+                     const CefString& title) override {
+    std::lock_guard lock(mutex_);
+    current_title_ = title.ToString();
+    if (options_.headless) {
+      return;
+    }
+    auto it = browser_window_tokens_.find(browser->GetIdentifier());
+    if (it != browser_window_tokens_.end()) {
+      AegisSetBrowserHostTitle(it->second, title.ToString());
+    }
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     AppendDebugLog("host: on_before_close");
+    AegisBrowserHostWindowToken window_token = 0;
+    bool primary_browser_closed = false;
+    bool closed_by_user = false;
     {
       std::lock_guard lock(mutex_);
+      browsers_.erase(browser->GetIdentifier());
+      auto window_it = browser_window_tokens_.find(browser->GetIdentifier());
+      if (window_it != browser_window_tokens_.end()) {
+        window_token = window_it->second;
+        browser_window_tokens_.erase(window_it);
+      }
       if (browser_.get() && browser->IsSame(browser_)) {
+        closed_by_user = !options_.headless && AegisBrowserHostWindowCloseRequested(browser);
         browser_ = nullptr;
         request_context_ = nullptr;
-        client_ = nullptr;
         page_ready_ = false;
         renderer_ready_ = false;
         runtime_installed_ = false;
         browser_closed_ = true;
+        primary_browser_closed = true;
+        closed_by_user_ = closed_by_user;
         cv_.notify_all();
       }
     }
     if (!options_.headless) {
-      AegisCloseBrowserHostWindow();
+      AegisDetachBrowserFromHostWindow(browser);
+      if (window_token != 0) {
+        AegisCloseBrowserHostWindow(window_token, false);
+      }
+    }
+    if (primary_browser_closed && closed_by_user) {
+      AppendDebugLog("host: primary_browser_closed_by_user");
     }
   }
 
@@ -948,7 +1100,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     PushLocalEvent(NetworkEvent(request->GetIdentifier(), request->GetURL().ToString()));
   }
 
-  bool HandleBrowserProcessMessage(CefRefPtr<CefBrowser>,
+  bool HandleBrowserProcessMessage(CefRefPtr<CefBrowser> browser,
                                    CefRefPtr<CefFrame>,
                                    CefProcessId source_process,
                                    CefRefPtr<CefProcessMessage> message) {
@@ -963,6 +1115,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (args->GetString(0).ToString() == aegis::kLifecycleContextReady) {
         AppendDebugLog("host: lifecycle context_ready");
         std::lock_guard lock(mutex_);
+        if (!browser_.get() || !browser.get() || !browser->IsSame(browser_)) {
+          return true;
+        }
         renderer_ready_ = true;
         runtime_installed_ = true;
         const auto url = args->GetString(1).ToString();
@@ -1207,12 +1362,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       AppendDebugLog("host: shutdown");
       const auto has_browser = [this]() {
         std::lock_guard lock(mutex_);
-        return browser_.get() != nullptr;
+        return !browsers_.empty();
       }();
       if (has_browser) {
         CloseBrowserOnUiThread();
         const auto deadline = std::chrono::steady_clock::now() + kShutdownTimeout;
-        PumpUntil([this]() { return browser_closed_ || browser_.get() == nullptr; }, deadline,
+        PumpUntil([this]() { return browsers_.empty(); }, deadline,
                   "timed out waiting for browser shutdown");
       }
       AegisResetCefMessagePumpScheduler();
@@ -1250,8 +1405,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
       CefBrowserSettings settings;
 
-      client_ = new AegisHostClient(options_.headless,
-                                    static_cast<::AegisClientDelegate*>(this), this);
       const auto initial_url = options_.start_url.empty() ? std::string(kBootstrapUrl)
                                                           : options_.start_url;
 
@@ -1260,19 +1413,26 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         CefWindowInfo window_info;
         window_info.SetAsWindowless(kNullWindowHandle);
         window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
-        if (!CefBrowserHost::CreateBrowser(window_info, client_, initial_url, settings, nullptr,
-                                           request_context_)) {
+        if (!CefBrowserHost::CreateBrowser(
+                window_info,
+                new AegisHostClient(true, static_cast<::AegisClientDelegate*>(this), this, 0,
+                                    false),
+                initial_url, settings, nullptr, request_context_)) {
           throw std::runtime_error("failed to create headless browser");
         }
         AppendDebugLog("host: create headless browser requested");
         return;
       }
+      primary_window_token_ = AegisCreateBrowserHostWindow("Aegis", 1280, 800);
       CefWindowInfo window_info;
-      window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
+      window_info.SetAsChild(AegisGetBrowserHostWindowView(primary_window_token_),
                              CefRect(0, 0, 1280, 800));
       window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
-      if (!CefBrowserHost::CreateBrowser(window_info, client_, initial_url, settings, nullptr,
-                                         request_context_)) {
+      if (!CefBrowserHost::CreateBrowser(
+              window_info,
+              new AegisHostClient(false, static_cast<::AegisClientDelegate*>(this), this,
+                                  primary_window_token_, false),
+              initial_url, settings, nullptr, request_context_)) {
         throw std::runtime_error("failed to create headful browser");
       }
       AppendDebugLog("host: create headful browser requested");
@@ -1288,8 +1448,17 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   void CloseBrowserOnUiThread() {
     auto task = [this]() {
       CEF_REQUIRE_UI_THREAD();
-      if (browser_.get()) {
-        browser_->GetHost()->CloseBrowser(true);
+      std::vector<CefRefPtr<CefBrowser>> browsers;
+      {
+        std::lock_guard lock(mutex_);
+        for (const auto& [_, browser] : browsers_) {
+          browsers.push_back(browser);
+        }
+      }
+      for (const auto& browser : browsers) {
+        if (browser.get()) {
+          browser->GetHost()->CloseBrowser(true);
+        }
       }
     };
     if (CefCurrentlyOn(TID_UI)) {
@@ -1715,7 +1884,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   const bool manage_cef_lifecycle_;
 
   CefRefPtr<AegisApp> app_;
-  CefRefPtr<AegisClient> client_;
 
   mutable std::mutex mutex_;
   std::condition_variable cv_;
@@ -1725,8 +1893,13 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   bool renderer_ready_ = false;
   bool runtime_installed_ = false;
   bool browser_closed_ = false;
+  bool closed_by_user_ = false;
   std::string startup_error_;
   std::string current_url_ = "about:blank";
+  std::string current_title_ = "Aegis";
+  bool can_go_back_ = false;
+  bool can_go_forward_ = false;
+  bool is_loading_ = false;
   int next_request_id_ = 1;
   std::vector<std::pair<std::string, std::string>> network_overrides_;
   std::vector<ManagedCookie> cookie_jar_;
@@ -1737,6 +1910,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   std::chrono::steady_clock::time_point current_operation_started_at_ =
       std::chrono::steady_clock::now();
 
+  AegisBrowserHostWindowToken primary_window_token_ = 0;
+  std::map<int, CefRefPtr<CefBrowser>> browsers_;
+  std::map<int, AegisBrowserHostWindowToken> browser_window_tokens_;
   CefRefPtr<CefBrowser> browser_;
   CefRefPtr<CefRequestContext> request_context_;
 };
@@ -1856,6 +2032,46 @@ AegisHostStatus Pump(
   return Dispatch(ctx, input_ptr, input_len, output, &CefHost::Pump);
 }
 
+AegisHostStatus SnapshotChromeState(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::SnapshotChromeState);
+}
+
+AegisHostStatus HostGoBack(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::GoBack);
+}
+
+AegisHostStatus HostGoForward(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::GoForward);
+}
+
+AegisHostStatus HostReloadPage(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::ReloadPage);
+}
+
+AegisHostStatus HostStopLoad(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::StopLoad);
+}
+
 void FreeBuffer(AegisHostHandle, AegisHostBuffer buffer) {
   delete[] buffer.ptr;
 }
@@ -1873,6 +2089,11 @@ AegisHostFunctionTable ExportFunctionTable() {
       .drain_events = DrainEvents,
       .navigate = Navigate,
       .pump = Pump,
+      .snapshot_chrome_state = SnapshotChromeState,
+      .go_back = HostGoBack,
+      .go_forward = HostGoForward,
+      .reload_page = HostReloadPage,
+      .stop_load = HostStopLoad,
       .free_buffer = FreeBuffer,
   };
 }

@@ -13,7 +13,7 @@ use crate::dom::node::DomSnapshot;
 use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
-use crate::transport::bridge::{AegisError, CefBridge, HostFunctionTable, HostHandle};
+use crate::transport::bridge::{AegisError, BrowserChromeState, CefBridge, HostFunctionTable, HostHandle};
 
 type CreateHost = unsafe extern "C" fn(input_ptr: *const u8, input_len: usize) -> HostHandle;
 type LastErrorMessage = unsafe extern "C" fn() -> *const std::ffi::c_char;
@@ -149,6 +149,26 @@ impl LoadedAegisClient {
 
     pub fn runtime_status(&self) -> RuntimeStatus {
         self.client.runtime().runtime_status()
+    }
+
+    pub fn snapshot_chrome_state(&mut self) -> Result<BrowserChromeState, AegisError> {
+        self.client.runtime_mut().bridge_mut().snapshot_chrome_state()
+    }
+
+    pub fn go_back(&mut self) -> Result<(), AegisError> {
+        self.client.runtime_mut().bridge_mut().go_back()
+    }
+
+    pub fn go_forward(&mut self) -> Result<(), AegisError> {
+        self.client.runtime_mut().bridge_mut().go_forward()
+    }
+
+    pub fn reload_page(&mut self) -> Result<(), AegisError> {
+        self.client.runtime_mut().bridge_mut().reload_page()
+    }
+
+    pub fn stop_load(&mut self) -> Result<(), AegisError> {
+        self.client.runtime_mut().bridge_mut().stop_load()
     }
 }
 

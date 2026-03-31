@@ -24,7 +24,7 @@ use crate::host::LoadedAegisClient;
 use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
-use crate::transport::bridge::AegisError;
+use crate::transport::bridge::{AegisError, BrowserChromeState};
 
 const IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
@@ -37,6 +37,21 @@ pub struct ApiState {
     startup: Arc<Mutex<ServeStartupMetrics>>,
     profile: SessionProfileInfo,
     diagnostics: Arc<Mutex<ServeDiagnostics>>,
+    chrome_tx: Arc<tokio::sync::watch::Sender<BrowserChromeState>>,
+}
+
+impl ApiState {
+    pub fn chrome_rx(&self) -> tokio::sync::watch::Receiver<BrowserChromeState> {
+        self.chrome_tx.subscribe()
+    }
+
+    pub fn chrome_state_snapshot(&self) -> BrowserChromeState {
+        self.chrome_tx.borrow().clone()
+    }
+
+    pub fn send_command(&self, command: ApiCommand) -> Result<(), mpsc::SendError<ApiCommand>> {
+        self.tx.send(command)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,7 +93,7 @@ pub struct EventQuery {
     pub since: u64,
 }
 
-enum ApiCommand {
+pub enum ApiCommand {
     InjectSession(SessionState, oneshot::Sender<Result<(), AegisError>>),
     SnapshotSession(oneshot::Sender<Result<SessionState, AegisError>>),
     SaveSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
@@ -94,6 +109,11 @@ enum ApiCommand {
     SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
     Events(u64, oneshot::Sender<Result<EventReadWindow, AegisError>>),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
+    GoBack,
+    GoForward,
+    Reload,
+    StopLoad,
+    ChromeNavigate(String),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -223,6 +243,8 @@ pub async fn serve(
         total_ready_ms: 0,
     }));
     let diagnostics = Arc::new(Mutex::new(ServeDiagnostics::new(client.runtime_status())));
+    let (chrome_tx, _chrome_rx) = tokio::sync::watch::channel(BrowserChromeState::default());
+    let chrome_tx = Arc::new(chrome_tx);
     let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
     let state = ApiState {
         tx,
@@ -231,6 +253,7 @@ pub async fn serve(
         startup: startup.clone(),
         profile: profile_store.info(),
         diagnostics: diagnostics.clone(),
+        chrome_tx: chrome_tx.clone(),
     };
     let startup_host_library = state.host_library.clone();
 
@@ -431,9 +454,36 @@ pub async fn serve(
                     record_operation_finished(&diagnostics, "enable_trace", &client, &Ok(()));
                     let _ = reply.send(Ok(()));
                 }
+                ApiCommand::GoBack => {
+                    let _ = client.go_back();
+                }
+                ApiCommand::GoForward => {
+                    let _ = client.go_forward();
+                }
+                ApiCommand::Reload => {
+                    let _ = client.reload_page();
+                }
+                ApiCommand::StopLoad => {
+                    let _ = client.stop_load();
+                }
+                ApiCommand::ChromeNavigate(url) => {
+                    let _ = client.navigate(url);
+                }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => match client.pump() {
-                Ok(()) => record_heartbeat(&diagnostics, &client),
+                Ok(()) => {
+                    record_heartbeat(&diagnostics, &client);
+                    if let Ok(state) = client.snapshot_chrome_state() {
+                        let _ = chrome_tx.send_if_modified(|current| {
+                            if *current != state {
+                                *current = state;
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                    }
+                }
                 Err(error) => {
                     record_operation_failure(
                         &diagnostics,
@@ -667,7 +717,11 @@ fn origin_key(url: &str) -> String {
 }
 
 pub fn router(state: ApiState) -> Router {
-    Router::new()
+    use super::chrome;
+    use tower_http::cors::CorsLayer;
+    use tower_http::services::ServeDir;
+
+    let mut app = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(readiness))
         .route("/doctor", get(doctor))
@@ -680,7 +734,21 @@ pub fn router(state: ApiState) -> Router {
         .route("/dom", get(snapshot_dom))
         .route("/events", get(events))
         .route("/trace/enable", post(enable_trace))
-        .with_state(state)
+        .route("/chrome/state", get(chrome::chrome_state_sse))
+        .route("/chrome/state/snapshot", get(chrome::chrome_state_snapshot))
+        .route("/chrome/back", post(chrome::chrome_back))
+        .route("/chrome/forward", post(chrome::chrome_forward))
+        .route("/chrome/reload", post(chrome::chrome_reload))
+        .route("/chrome/stop", post(chrome::chrome_stop))
+        .route("/chrome/navigate", post(chrome::chrome_navigate))
+        .layer(CorsLayer::permissive());
+
+    let web_ui_dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web-ui/dist");
+    if web_ui_dist.is_dir() {
+        app = app.nest_service("/web-ui", ServeDir::new(web_ui_dist));
+    }
+
+    app.with_state(state)
 }
 
 async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {

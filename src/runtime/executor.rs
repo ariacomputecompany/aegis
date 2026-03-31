@@ -261,6 +261,10 @@ impl AegisRuntime {
         &self.bridge
     }
 
+    pub fn bridge_mut(&mut self) -> &mut CefBridge {
+        &mut self.bridge
+    }
+
     pub fn enable_trace_recording(&mut self, path: impl Into<std::path::PathBuf>) {
         self.trace_recorder = Some(TraceRecorder::new(path, self.browser_config.clone()));
     }

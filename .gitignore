@@ -18,5 +18,9 @@
 /.idea/
 /.vscode/
 
+# Web UI build artifacts
+/web-ui/node_modules/
+/web-ui/dist/
+
 # Logs
 *.log
