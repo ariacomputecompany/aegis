@@ -213,8 +213,12 @@ export function TelemetryPanel() {
                 title="Recent network requests"
                 items={data.runtime.events.recent_network_requests.map((item) => ({
                   key: item.request_id,
-                  primary: item.url,
-                  secondary: `${item.request_id} at ${formatTime(item.timestamp_ms)}`,
+                  primary: `${item.method ?? "request"} ${item.url}`,
+                  secondary:
+                    `${item.request_id} at ${formatTime(item.timestamp_ms)}` +
+                    `${item.status_code != null ? ` • ${item.status_code}` : ""}` +
+                    `${item.request_status ? ` • ${item.request_status}` : ""}` +
+                    `${item.content_length_bytes != null ? ` • ${formatBytes(item.content_length_bytes)}` : ""}`,
                 }))}
               />
               <TelemetryList

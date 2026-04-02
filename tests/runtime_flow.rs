@@ -190,6 +190,24 @@ fn filters_event_stream_by_type() {
 }
 
 #[test]
+fn network_event_round_trips_extended_shape() {
+    let event = RuntimeEvent::Network {
+        request_id: "42".into(),
+        url: "https://example.com/api".into(),
+        method: Some("POST".into()),
+        status_code: Some(201),
+        status_text: Some("Created".into()),
+        mime_type: Some("application/json".into()),
+        request_status: Some("success".into()),
+        content_length_bytes: Some(128),
+    };
+
+    let json = serde_json::to_string(&event).expect("event serializes");
+    let decoded: RuntimeEvent = serde_json::from_str(&json).expect("event deserializes");
+    assert_eq!(decoded, event);
+}
+
+#[test]
 fn detects_event_gaps_when_history_is_truncated() {
     let mut stream = EventStream::with_max_retained(2);
     for sequence in 1..=3 {

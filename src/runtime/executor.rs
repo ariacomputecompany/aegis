@@ -67,6 +67,12 @@ pub struct RecentNetworkRequestTelemetry {
     pub timestamp_ms: u64,
     pub request_id: String,
     pub url: String,
+    pub method: Option<String>,
+    pub status_code: Option<u16>,
+    pub status_text: Option<String>,
+    pub mime_type: Option<String>,
+    pub request_status: Option<String>,
+    pub content_length_bytes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -394,7 +400,16 @@ impl AegisRuntime {
                     },
                 );
             }
-            RuntimeEvent::Network { request_id, url } => {
+            RuntimeEvent::Network {
+                request_id,
+                url,
+                method,
+                status_code,
+                status_text,
+                mime_type,
+                request_status,
+                content_length_bytes,
+            } => {
                 self.network_events += 1;
                 push_recent(
                     &mut self.recent_network_requests,
@@ -403,6 +418,12 @@ impl AegisRuntime {
                         timestamp_ms: event.timestamp_ms,
                         request_id: request_id.clone(),
                         url: url.clone(),
+                        method: method.clone(),
+                        status_code: *status_code,
+                        status_text: status_text.clone(),
+                        mime_type: mime_type.clone(),
+                        request_status: request_status.clone(),
+                        content_length_bytes: *content_length_bytes,
                     },
                 );
             }

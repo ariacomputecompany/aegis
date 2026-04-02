@@ -12,6 +12,7 @@
 #include <functional>
 #include <cstdlib>
 #include <cerrno>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -56,6 +57,22 @@ constexpr char kBootstrapUrl[] =
     "data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E";
 
 void AppendDebugLog(const std::string& message);
+
+std::string UrlRequestStatusToString(cef_urlrequest_status_t status) {
+  switch (status) {
+    case UR_UNKNOWN:
+      return "unknown";
+    case UR_SUCCESS:
+      return "success";
+    case UR_IO_PENDING:
+      return "io_pending";
+    case UR_CANCELED:
+      return "canceled";
+    case UR_FAILED:
+      return "failed";
+  }
+  return "unknown";
+}
 
 std::string EscapeJsonString(const std::string& input) {
   std::string output;
@@ -984,9 +1001,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                               CefRefPtr<CefFrame>,
                               CefRefPtr<CefRequest> request,
                               CefRefPtr<CefResponse> response,
-                              cef_urlrequest_status_t) override {
+                              cef_urlrequest_status_t status) override {
     CaptureResponseCookies(request, response);
-    PushLocalEvent(NetworkEvent(request->GetIdentifier(), request->GetURL().ToString()));
+    PushLocalEvent(NetworkEvent(request, response, status));
   }
 
   bool HandleBrowserProcessMessage(CefRefPtr<CefBrowser>,
@@ -1108,12 +1125,36 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     return wrapped;
   }
 
-  CefRefPtr<CefValue> NetworkEvent(std::uint64_t request_id, const std::string& url) {
+  CefRefPtr<CefValue> NetworkEvent(CefRefPtr<CefRequest> request,
+                                   CefRefPtr<CefResponse> response,
+                                   cef_urlrequest_status_t status) {
     auto event = CefDictionaryValue::Create();
     auto body = CefDictionaryValue::Create();
     body->SetString("type", "network");
-    body->SetString("request_id", std::to_string(request_id));
-    body->SetString("url", url);
+    if (request.get()) {
+      body->SetString("request_id", std::to_string(request->GetIdentifier()));
+      body->SetString("url", request->GetURL().ToString());
+      body->SetString("method", request->GetMethod().ToString());
+    }
+    if (response.get()) {
+      body->SetInt("status_code", response->GetStatus());
+      body->SetString("status_text", response->GetStatusText().ToString());
+      body->SetString("mime_type", response->GetMimeType().ToString());
+      CefResponse::HeaderMap headers;
+      response->GetHeaderMap(headers);
+      auto it = headers.find("Content-Length");
+      if (it != headers.end()) {
+        char* end = nullptr;
+        errno = 0;
+        const auto parsed = std::strtoll(it->second.c_str(), &end, 10);
+        if (end != it->second.c_str() && errno == 0 &&
+            parsed <= std::numeric_limits<int>::max() &&
+            parsed >= std::numeric_limits<int>::min()) {
+          body->SetInt("content_length_bytes", static_cast<int>(parsed));
+        }
+      }
+    }
+    body->SetString("request_status", UrlRequestStatusToString(status));
     event->SetDictionary("event", body);
 
     auto wrapped = CefValue::Create();

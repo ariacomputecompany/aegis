@@ -77,6 +77,12 @@ export interface TelemetryResponse {
         timestamp_ms: number;
         request_id: string;
         url: string;
+        method?: string | null;
+        status_code?: number | null;
+        status_text?: string | null;
+        mime_type?: string | null;
+        request_status?: string | null;
+        content_length_bytes?: number | null;
       }>;
       recent_logs: Array<{
         sequence: number;

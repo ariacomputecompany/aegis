@@ -27,6 +27,12 @@ pub enum RuntimeEvent {
     Network {
         request_id: String,
         url: String,
+        method: Option<String>,
+        status_code: Option<u16>,
+        status_text: Option<String>,
+        mime_type: Option<String>,
+        request_status: Option<String>,
+        content_length_bytes: Option<i64>,
     },
     Log {
         level: String,
