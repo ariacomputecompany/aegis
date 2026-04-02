@@ -265,6 +265,38 @@ export function TelemetryPanel() {
                 }))}
               />
               <TelemetryList
+                title="Methods"
+                items={data.runtime.events.network_summary.method_breakdown.map((item) => ({
+                  key: item.key,
+                  primary: item.key,
+                  secondary: `${item.count} requests`,
+                }))}
+              />
+              <TelemetryList
+                title="MIME types"
+                items={data.runtime.events.network_summary.mime_breakdown.map((item) => ({
+                  key: item.key,
+                  primary: item.key,
+                  secondary: `${item.count} responses`,
+                }))}
+              />
+              <TelemetryList
+                title="Status codes"
+                items={data.runtime.events.network_summary.status_code_breakdown.map((item) => ({
+                  key: item.key,
+                  primary: item.key,
+                  secondary: `${item.count} responses`,
+                }))}
+              />
+              <TelemetryList
+                title="Top errors"
+                items={data.runtime.events.network_summary.top_errors.map((item) => ({
+                  key: item.key,
+                  primary: item.key,
+                  secondary: `${item.count} occurrences`,
+                }))}
+              />
+              <TelemetryList
                 title="Recent runtime logs"
                 items={data.runtime.events.recent_logs.map((item, index) => ({
                   key: `${item.sequence}-${index}`,

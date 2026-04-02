@@ -117,6 +117,12 @@ pub struct NetworkDomainTelemetry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkBreakdownTelemetry {
+    pub key: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkTelemetrySummary {
     pub total_requests: u64,
     pub successful_requests: u64,
@@ -131,6 +137,10 @@ pub struct NetworkTelemetrySummary {
     pub transferred_bytes: u64,
     pub avg_duration_ms: Option<u64>,
     pub max_duration_ms: Option<u64>,
+    pub method_breakdown: Vec<NetworkBreakdownTelemetry>,
+    pub mime_breakdown: Vec<NetworkBreakdownTelemetry>,
+    pub status_code_breakdown: Vec<NetworkBreakdownTelemetry>,
+    pub top_errors: Vec<NetworkBreakdownTelemetry>,
     pub top_domains: Vec<NetworkDomainTelemetry>,
 }
 
@@ -143,6 +153,11 @@ struct NetworkDomainAggregate {
     total_duration_ms: u64,
     duration_count: u64,
     max_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NetworkBreakdownAggregate {
+    count: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -288,6 +303,10 @@ pub struct AegisRuntime {
     network_duration_samples: u64,
     max_network_duration_ms: u64,
     network_domains: BTreeMap<String, NetworkDomainAggregate>,
+    network_methods: BTreeMap<String, NetworkBreakdownAggregate>,
+    network_mime_types: BTreeMap<String, NetworkBreakdownAggregate>,
+    network_status_codes: BTreeMap<String, NetworkBreakdownAggregate>,
+    network_errors: BTreeMap<String, NetworkBreakdownAggregate>,
     recent_navigations: VecDeque<RecentNavigationTelemetry>,
     recent_network_requests: VecDeque<RecentNetworkRequestTelemetry>,
     recent_logs: VecDeque<RecentLogTelemetry>,
@@ -345,6 +364,10 @@ impl AegisRuntime {
             network_duration_samples: 0,
             max_network_duration_ms: 0,
             network_domains: BTreeMap::new(),
+            network_methods: BTreeMap::new(),
+            network_mime_types: BTreeMap::new(),
+            network_status_codes: BTreeMap::new(),
+            network_errors: BTreeMap::new(),
             recent_navigations: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
             recent_network_requests: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
             recent_logs: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
@@ -522,6 +545,31 @@ impl AegisRuntime {
                     received_content_length_bytes.and_then(|value| u64::try_from(value).ok())
                 {
                     self.transferred_network_bytes += bytes;
+                }
+                if let Some(method) = method.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+                    self.network_methods
+                        .entry(method.to_ascii_uppercase())
+                        .or_default()
+                        .count += 1;
+                }
+                if let Some(mime_type) = mime_type.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+                    self.network_mime_types
+                        .entry(normalize_mime_group(mime_type))
+                        .or_default()
+                        .count += 1;
+                }
+                if let Some(status_code) = status_code {
+                    self.network_status_codes
+                        .entry(status_code.to_string())
+                        .or_default()
+                        .count += 1;
+                }
+                if let Some(error_key) = build_network_error_key(
+                    request_status.as_deref(),
+                    error_code.as_ref(),
+                    error_text.as_deref(),
+                ) {
+                    self.network_errors.entry(error_key).or_default().count += 1;
                 }
                 if let Some(duration_ms) = duration_ms {
                     self.total_network_duration_ms += *duration_ms;
@@ -1418,6 +1466,18 @@ impl AegisRuntime {
         });
         top_domains.truncate(5);
 
+        let mut method_breakdown = breakdown_from_map(&self.network_methods);
+        method_breakdown.truncate(6);
+
+        let mut mime_breakdown = breakdown_from_map(&self.network_mime_types);
+        mime_breakdown.truncate(6);
+
+        let mut status_code_breakdown = breakdown_from_map(&self.network_status_codes);
+        status_code_breakdown.truncate(8);
+
+        let mut top_errors = breakdown_from_map(&self.network_errors);
+        top_errors.truncate(6);
+
         NetworkTelemetrySummary {
             total_requests: self.network_events,
             successful_requests: self.successful_network_requests,
@@ -1440,6 +1500,10 @@ impl AegisRuntime {
             } else {
                 None
             },
+            method_breakdown,
+            mime_breakdown,
+            status_code_breakdown,
+            top_errors,
             top_domains,
         }
     }
@@ -1491,4 +1555,57 @@ fn extract_host(url: &str) -> Option<String> {
     } else {
         Some(host.to_ascii_lowercase())
     }
+}
+
+fn normalize_mime_group(mime_type: &str) -> String {
+    let mime_type = mime_type.trim().to_ascii_lowercase();
+    if mime_type.is_empty() {
+        return "unknown".into();
+    }
+    if let Some((group, subtype)) = mime_type.split_once('/') {
+        let subtype = subtype.split(';').next().unwrap_or(subtype).trim();
+        return format!("{group}/{subtype}");
+    }
+    mime_type
+}
+
+fn build_network_error_key(
+    request_status: Option<&str>,
+    error_code: Option<&i32>,
+    error_text: Option<&str>,
+) -> Option<String> {
+    if let Some(error_code) = error_code {
+        let mut key = format!("code:{error_code}");
+        if let Some(error_text) = error_text.map(str::trim).filter(|value| !value.is_empty()) {
+            key.push(' ');
+            key.push_str(error_text);
+        }
+        return Some(key);
+    }
+    if let Some(error_text) = error_text.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(error_text.to_string());
+    }
+    request_status
+        .map(str::trim)
+        .filter(|value| matches!(*value, "failed" | "canceled"))
+        .map(ToOwned::to_owned)
+}
+
+fn breakdown_from_map(
+    aggregates: &BTreeMap<String, NetworkBreakdownAggregate>,
+) -> Vec<NetworkBreakdownTelemetry> {
+    let mut breakdown = aggregates
+        .iter()
+        .map(|(key, aggregate)| NetworkBreakdownTelemetry {
+            key: key.clone(),
+            count: aggregate.count,
+        })
+        .collect::<Vec<_>>();
+    breakdown.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    breakdown
 }

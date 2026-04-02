@@ -81,6 +81,22 @@ export interface TelemetryResponse {
         transferred_bytes: number;
         avg_duration_ms?: number | null;
         max_duration_ms?: number | null;
+        method_breakdown: Array<{
+          key: string;
+          count: number;
+        }>;
+        mime_breakdown: Array<{
+          key: string;
+          count: number;
+        }>;
+        status_code_breakdown: Array<{
+          key: string;
+          count: number;
+        }>;
+        top_errors: Array<{
+          key: string;
+          count: number;
+        }>;
         top_domains: Array<{
           host: string;
           request_count: number;
