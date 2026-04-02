@@ -226,6 +226,44 @@ export function TelemetryPanel() {
                     `${item.response_headers ? ` • ${Object.keys(item.response_headers).length} headers` : ""}`,
                 }))}
               />
+              <div className="telemetry-grid telemetry-grid--spaced">
+                <Metric
+                  label="Transferred"
+                  value={formatBytes(data.runtime.events.network_summary.transferred_bytes)}
+                />
+                <Metric
+                  label="Avg request"
+                  value={formatMs(data.runtime.events.network_summary.avg_duration_ms)}
+                />
+                <Metric
+                  label="Max request"
+                  value={formatMs(data.runtime.events.network_summary.max_duration_ms)}
+                />
+                <Metric
+                  label="Main-frame reqs"
+                  value={String(data.runtime.events.network_summary.main_frame_requests)}
+                />
+                <Metric
+                  label="2xx"
+                  value={String(data.runtime.events.network_summary.successful_responses)}
+                />
+                <Metric
+                  label="4xx/5xx"
+                  value={`${data.runtime.events.network_summary.client_error_responses}/${data.runtime.events.network_summary.server_error_responses}`}
+                />
+              </div>
+              <TelemetryList
+                title="Top domains"
+                items={data.runtime.events.network_summary.top_domains.map((item) => ({
+                  key: item.host,
+                  primary: `${item.host} • ${item.request_count} req`,
+                  secondary:
+                    `${formatBytes(item.transferred_bytes)} transferred` +
+                    `${item.failure_count > 0 ? ` • ${item.failure_count} failed` : ""}` +
+                    `${item.redirect_count > 0 ? ` • ${item.redirect_count} redirected` : ""}` +
+                    `${item.avg_duration_ms != null ? ` • avg ${formatMs(item.avg_duration_ms)}` : ""}`,
+                }))}
+              />
               <TelemetryList
                 title="Recent runtime logs"
                 items={data.runtime.events.recent_logs.map((item, index) => ({

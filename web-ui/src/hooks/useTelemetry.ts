@@ -67,6 +67,30 @@ export interface TelemetryResponse {
       navigation_events: number;
       network_events: number;
       log_events: number;
+      network_summary: {
+        total_requests: number;
+        successful_requests: number;
+        failed_requests: number;
+        redirected_requests: number;
+        main_frame_requests: number;
+        informational_responses: number;
+        successful_responses: number;
+        redirect_responses: number;
+        client_error_responses: number;
+        server_error_responses: number;
+        transferred_bytes: number;
+        avg_duration_ms?: number | null;
+        max_duration_ms?: number | null;
+        top_domains: Array<{
+          host: string;
+          request_count: number;
+          failure_count: number;
+          redirect_count: number;
+          transferred_bytes: number;
+          avg_duration_ms?: number | null;
+          max_duration_ms?: number | null;
+        }>;
+      };
       recent_navigations: Array<{
         sequence: number;
         timestamp_ms: number;

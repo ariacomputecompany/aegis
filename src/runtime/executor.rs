@@ -1,7 +1,7 @@
 use crate::browser::BrowserConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,9 +99,50 @@ pub struct EventTelemetrySummary {
     pub navigation_events: u64,
     pub network_events: u64,
     pub log_events: u64,
+    pub network_summary: NetworkTelemetrySummary,
     pub recent_navigations: Vec<RecentNavigationTelemetry>,
     pub recent_network_requests: Vec<RecentNetworkRequestTelemetry>,
     pub recent_logs: Vec<RecentLogTelemetry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkDomainTelemetry {
+    pub host: String,
+    pub request_count: u64,
+    pub failure_count: u64,
+    pub redirect_count: u64,
+    pub transferred_bytes: u64,
+    pub avg_duration_ms: Option<u64>,
+    pub max_duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkTelemetrySummary {
+    pub total_requests: u64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
+    pub redirected_requests: u64,
+    pub main_frame_requests: u64,
+    pub informational_responses: u64,
+    pub successful_responses: u64,
+    pub redirect_responses: u64,
+    pub client_error_responses: u64,
+    pub server_error_responses: u64,
+    pub transferred_bytes: u64,
+    pub avg_duration_ms: Option<u64>,
+    pub max_duration_ms: Option<u64>,
+    pub top_domains: Vec<NetworkDomainTelemetry>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NetworkDomainAggregate {
+    request_count: u64,
+    failure_count: u64,
+    redirect_count: u64,
+    transferred_bytes: u64,
+    total_duration_ms: u64,
+    duration_count: u64,
+    max_duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -233,6 +274,20 @@ pub struct AegisRuntime {
     navigation_events: u64,
     network_events: u64,
     log_events: u64,
+    successful_network_requests: u64,
+    failed_network_requests: u64,
+    redirected_network_requests: u64,
+    main_frame_network_requests: u64,
+    informational_responses: u64,
+    successful_responses: u64,
+    redirect_responses: u64,
+    client_error_responses: u64,
+    server_error_responses: u64,
+    transferred_network_bytes: u64,
+    total_network_duration_ms: u64,
+    network_duration_samples: u64,
+    max_network_duration_ms: u64,
+    network_domains: BTreeMap<String, NetworkDomainAggregate>,
     recent_navigations: VecDeque<RecentNavigationTelemetry>,
     recent_network_requests: VecDeque<RecentNetworkRequestTelemetry>,
     recent_logs: VecDeque<RecentLogTelemetry>,
@@ -276,6 +331,20 @@ impl AegisRuntime {
             navigation_events: 0,
             network_events: 0,
             log_events: 0,
+            successful_network_requests: 0,
+            failed_network_requests: 0,
+            redirected_network_requests: 0,
+            main_frame_network_requests: 0,
+            informational_responses: 0,
+            successful_responses: 0,
+            redirect_responses: 0,
+            client_error_responses: 0,
+            server_error_responses: 0,
+            transferred_network_bytes: 0,
+            total_network_duration_ms: 0,
+            network_duration_samples: 0,
+            max_network_duration_ms: 0,
+            network_domains: BTreeMap::new(),
             recent_navigations: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
             recent_network_requests: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
             recent_logs: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
@@ -425,6 +494,62 @@ impl AegisRuntime {
                 response_headers,
             } => {
                 self.network_events += 1;
+                if matches!(request_status.as_deref(), Some("success")) {
+                    self.successful_network_requests += 1;
+                }
+                if matches!(request_status.as_deref(), Some("failed" | "canceled"))
+                    || error_code.is_some()
+                {
+                    self.failed_network_requests += 1;
+                }
+                if redirect_url.is_some() {
+                    self.redirected_network_requests += 1;
+                }
+                if is_main_frame == &Some(true) {
+                    self.main_frame_network_requests += 1;
+                }
+                if let Some(status_code) = status_code {
+                    match *status_code {
+                        100..=199 => self.informational_responses += 1,
+                        200..=299 => self.successful_responses += 1,
+                        300..=399 => self.redirect_responses += 1,
+                        400..=499 => self.client_error_responses += 1,
+                        500..=599 => self.server_error_responses += 1,
+                        _ => {}
+                    }
+                }
+                if let Some(bytes) =
+                    received_content_length_bytes.and_then(|value| u64::try_from(value).ok())
+                {
+                    self.transferred_network_bytes += bytes;
+                }
+                if let Some(duration_ms) = duration_ms {
+                    self.total_network_duration_ms += *duration_ms;
+                    self.network_duration_samples += 1;
+                    self.max_network_duration_ms = self.max_network_duration_ms.max(*duration_ms);
+                }
+                if let Some(host) = extract_host(url) {
+                    let aggregate = self.network_domains.entry(host).or_default();
+                    aggregate.request_count += 1;
+                    if matches!(request_status.as_deref(), Some("failed" | "canceled"))
+                        || error_code.is_some()
+                    {
+                        aggregate.failure_count += 1;
+                    }
+                    if redirect_url.is_some() {
+                        aggregate.redirect_count += 1;
+                    }
+                    if let Some(bytes) =
+                        received_content_length_bytes.and_then(|value| u64::try_from(value).ok())
+                    {
+                        aggregate.transferred_bytes += bytes;
+                    }
+                    if let Some(duration_ms) = duration_ms {
+                        aggregate.total_duration_ms += *duration_ms;
+                        aggregate.duration_count += 1;
+                        aggregate.max_duration_ms = aggregate.max_duration_ms.max(*duration_ms);
+                    }
+                }
                 push_recent(
                     &mut self.recent_network_requests,
                     RecentNetworkRequestTelemetry {
@@ -557,6 +682,7 @@ impl AegisRuntime {
                 navigation_events: self.navigation_events,
                 network_events: self.network_events,
                 log_events: self.log_events,
+                network_summary: self.network_summary(),
                 recent_navigations: self.recent_navigations.iter().cloned().collect(),
                 recent_network_requests: self.recent_network_requests.iter().cloned().collect(),
                 recent_logs: self.recent_logs.iter().cloned().collect(),
@@ -1261,6 +1387,63 @@ impl AegisRuntime {
         }
     }
 
+    fn network_summary(&self) -> NetworkTelemetrySummary {
+        let mut top_domains = self
+            .network_domains
+            .iter()
+            .map(|(host, aggregate)| NetworkDomainTelemetry {
+                host: host.clone(),
+                request_count: aggregate.request_count,
+                failure_count: aggregate.failure_count,
+                redirect_count: aggregate.redirect_count,
+                transferred_bytes: aggregate.transferred_bytes,
+                avg_duration_ms: if aggregate.duration_count > 0 {
+                    Some(aggregate.total_duration_ms / aggregate.duration_count)
+                } else {
+                    None
+                },
+                max_duration_ms: if aggregate.duration_count > 0 {
+                    Some(aggregate.max_duration_ms)
+                } else {
+                    None
+                },
+            })
+            .collect::<Vec<_>>();
+        top_domains.sort_by(|left, right| {
+            right
+                .transferred_bytes
+                .cmp(&left.transferred_bytes)
+                .then_with(|| right.request_count.cmp(&left.request_count))
+                .then_with(|| left.host.cmp(&right.host))
+        });
+        top_domains.truncate(5);
+
+        NetworkTelemetrySummary {
+            total_requests: self.network_events,
+            successful_requests: self.successful_network_requests,
+            failed_requests: self.failed_network_requests,
+            redirected_requests: self.redirected_network_requests,
+            main_frame_requests: self.main_frame_network_requests,
+            informational_responses: self.informational_responses,
+            successful_responses: self.successful_responses,
+            redirect_responses: self.redirect_responses,
+            client_error_responses: self.client_error_responses,
+            server_error_responses: self.server_error_responses,
+            transferred_bytes: self.transferred_network_bytes,
+            avg_duration_ms: if self.network_duration_samples > 0 {
+                Some(self.total_network_duration_ms / self.network_duration_samples)
+            } else {
+                None
+            },
+            max_duration_ms: if self.network_duration_samples > 0 {
+                Some(self.max_network_duration_ms)
+            } else {
+                None
+            },
+            top_domains,
+        }
+    }
+
     fn mark_successful_bridge_roundtrip(&mut self) {
         self.last_successful_bridge_roundtrip_at_ms = Some(now_ms());
     }
@@ -1295,5 +1478,17 @@ fn push_recent<T>(queue: &mut VecDeque<T>, value: T) {
     queue.push_back(value);
     while queue.len() > RECENT_TELEMETRY_LIMIT {
         let _ = queue.pop_front();
+    }
+}
+
+fn extract_host(url: &str) -> Option<String> {
+    let (_, remainder) = url.split_once("://")?;
+    let authority = remainder.split('/').next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host).trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
     }
 }

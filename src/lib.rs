@@ -29,11 +29,11 @@ pub use native::{
 };
 pub use runtime::executor::{
     AegisRuntime, DomTelemetrySummary, EventTelemetrySummary, ExecutionReport,
-    PageJsHeapTelemetry, PageNavigationTelemetry, PagePaintTelemetry,
-    PageResourceTelemetry, PageResponsivenessTelemetry, PageRuntimeTelemetry,
-    PageStabilityTelemetry, PageViewportTelemetry, RecentLogTelemetry,
-    RecentNavigationTelemetry, RecentNetworkRequestTelemetry, RuntimeTelemetrySnapshot,
-    TraceTelemetry,
+    NetworkDomainTelemetry, NetworkTelemetrySummary, PageJsHeapTelemetry,
+    PageNavigationTelemetry, PagePaintTelemetry, PageResourceTelemetry,
+    PageResponsivenessTelemetry, PageRuntimeTelemetry, PageStabilityTelemetry,
+    PageViewportTelemetry, RecentLogTelemetry, RecentNavigationTelemetry,
+    RecentNetworkRequestTelemetry, RuntimeTelemetrySnapshot, TraceTelemetry,
 };
 pub use session::cookies::{Cookie, SessionState};
 pub use session::profile::{SessionProfileInfo, SessionProfileStore};
