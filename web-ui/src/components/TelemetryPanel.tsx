@@ -218,8 +218,10 @@ export function TelemetryPanel() {
                     `${item.request_id} at ${formatTime(item.timestamp_ms)}` +
                     `${item.status_code != null ? ` • ${item.status_code}` : ""}` +
                     `${item.request_status ? ` • ${item.request_status}` : ""}` +
+                    `${item.duration_ms != null ? ` • ${formatMs(item.duration_ms)}` : ""}` +
                     `${item.redirect_url ? ` • redirect ${item.redirect_url}` : ""}` +
                     `${item.error_text ? ` • ${item.error_text}` : ""}` +
+                    `${item.received_content_length_bytes != null ? ` • rx ${formatBytes(item.received_content_length_bytes)}` : ""}` +
                     `${item.content_length_bytes != null ? ` • ${formatBytes(item.content_length_bytes)}` : ""}` +
                     `${item.response_headers ? ` • ${Object.keys(item.response_headers).length} headers` : ""}`,
                 }))}

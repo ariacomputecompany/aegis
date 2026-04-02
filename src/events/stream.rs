@@ -33,6 +33,8 @@ pub enum RuntimeEvent {
         mime_type: Option<String>,
         request_status: Option<String>,
         content_length_bytes: Option<i64>,
+        received_content_length_bytes: Option<i64>,
+        duration_ms: Option<u64>,
         redirect_url: Option<String>,
         error_code: Option<i32>,
         error_text: Option<String>,

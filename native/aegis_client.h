@@ -33,7 +33,8 @@ class AegisClientDelegate {
                                       CefRefPtr<CefFrame> frame,
                                       CefRefPtr<CefRequest> request,
                                       CefRefPtr<CefResponse> response,
-                                      cef_urlrequest_status_t status) {}
+                                      cef_urlrequest_status_t status,
+                                      int64_t received_content_length) {}
   virtual void OnResourceRedirect(CefRefPtr<CefBrowser> browser,
                                   CefRefPtr<CefFrame> frame,
                                   CefRefPtr<CefRequest> request,

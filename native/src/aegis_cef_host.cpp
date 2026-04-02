@@ -545,6 +545,13 @@ struct RendererReply {
 
 class AegisCefHost;
 
+struct RequestTelemetryState {
+  std::string method;
+  std::string url;
+  bool is_main_frame = false;
+  std::chrono::steady_clock::time_point started_at = std::chrono::steady_clock::now();
+};
+
 class OperationScope {
  public:
   OperationScope(AegisCefHost* host, std::string name);
@@ -979,9 +986,15 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   cef_return_value_t OnBeforeResourceLoad(CefRefPtr<CefBrowser>,
-                                          CefRefPtr<CefFrame>,
+                                          CefRefPtr<CefFrame> frame,
                                           CefRefPtr<CefRequest> request) override {
     std::lock_guard lock(mutex_);
+    RequestTelemetryState telemetry;
+    telemetry.method = request->GetMethod().ToString();
+    telemetry.url = request->GetURL().ToString();
+    telemetry.is_main_frame = frame.get() && frame->IsMain();
+    telemetry.started_at = std::chrono::steady_clock::now();
+    request_telemetry_[request->GetIdentifier()] = std::move(telemetry);
     if (network_overrides_.empty()) {
       return RV_CONTINUE;
     }
@@ -998,12 +1011,16 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void OnResourceLoadComplete(CefRefPtr<CefBrowser>,
-                              CefRefPtr<CefFrame>,
+                              CefRefPtr<CefFrame> frame,
                               CefRefPtr<CefRequest> request,
                               CefRefPtr<CefResponse> response,
-                              cef_urlrequest_status_t status) override {
+                              cef_urlrequest_status_t status,
+                              int64_t received_content_length) override {
     CaptureResponseCookies(request, response);
-    PushLocalEvent(NetworkEvent(request, response, status));
+    PushLocalEvent(NetworkEvent(request, response, status, std::nullopt, std::nullopt,
+                                std::nullopt, std::nullopt,
+                                frame.get() && frame->IsMain(),
+                                received_content_length));
   }
 
   void OnResourceRedirect(CefRefPtr<CefBrowser>,
@@ -1161,14 +1178,36 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       std::optional<std::string> failed_url = std::nullopt,
       std::optional<int> error_code = std::nullopt,
       std::optional<std::string> error_text = std::nullopt,
-      std::optional<bool> is_main_frame = std::nullopt) {
+      std::optional<bool> is_main_frame = std::nullopt,
+      std::optional<int64_t> received_content_length = std::nullopt) {
     auto event = CefDictionaryValue::Create();
     auto body = CefDictionaryValue::Create();
     body->SetString("type", "network");
+    std::optional<std::uint64_t> duration_ms;
     if (request.get()) {
-      body->SetString("request_id", std::to_string(request->GetIdentifier()));
+      const auto request_id = request->GetIdentifier();
+      body->SetString("request_id", std::to_string(request_id));
       body->SetString("url", request->GetURL().ToString());
       body->SetString("method", request->GetMethod().ToString());
+      {
+        std::lock_guard lock(mutex_);
+        auto it = request_telemetry_.find(request_id);
+        if (it != request_telemetry_.end()) {
+          duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - it->second.started_at)
+                            .count();
+          if (!body->HasKey("method") && !it->second.method.empty()) {
+            body->SetString("method", it->second.method);
+          }
+          if (!body->HasKey("url") && !it->second.url.empty()) {
+            body->SetString("url", it->second.url);
+          }
+          if (!is_main_frame.has_value()) {
+            is_main_frame = it->second.is_main_frame;
+          }
+          request_telemetry_.erase(it);
+        }
+      }
     }
     if (response.get()) {
       body->SetInt("status_code", response->GetStatus());
@@ -1204,6 +1243,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }
     if (is_main_frame.has_value()) {
       body->SetBool("is_main_frame", *is_main_frame);
+    }
+    if (received_content_length.has_value() && *received_content_length >= 0 &&
+        *received_content_length <= std::numeric_limits<int>::max()) {
+      body->SetInt("received_content_length_bytes",
+                   static_cast<int>(*received_content_length));
+    }
+    if (duration_ms.has_value() && *duration_ms <= std::numeric_limits<int>::max()) {
+      body->SetInt("duration_ms", static_cast<int>(*duration_ms));
     }
     body->SetString("request_status", UrlRequestStatusToString(status));
     event->SetDictionary("event", body);
@@ -1865,6 +1912,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   std::vector<std::pair<std::string, std::string>> network_overrides_;
   std::vector<ManagedCookie> cookie_jar_;
   std::vector<std::string> local_events_;
+  std::map<std::uint64_t, RequestTelemetryState> request_telemetry_;
   std::map<int, RendererReply> renderer_replies_;
   std::string current_operation_name_;
   std::string current_operation_stage_;

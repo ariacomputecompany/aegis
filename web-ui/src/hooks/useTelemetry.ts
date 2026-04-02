@@ -83,6 +83,8 @@ export interface TelemetryResponse {
         mime_type?: string | null;
         request_status?: string | null;
         content_length_bytes?: number | null;
+        received_content_length_bytes?: number | null;
+        duration_ms?: number | null;
         redirect_url?: string | null;
         error_code?: number | null;
         error_text?: string | null;

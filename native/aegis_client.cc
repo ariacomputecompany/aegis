@@ -47,9 +47,10 @@ class AegisResourceRequestHandler : public CefResourceRequestHandler {
                               CefRefPtr<CefRequest> request,
                               CefRefPtr<CefResponse> response,
                               URLRequestStatus status,
-                              int64_t) override {
+                              int64_t received_content_length) override {
     if (delegate_) {
-      delegate_->OnResourceLoadComplete(browser, frame, request, response, status);
+      delegate_->OnResourceLoadComplete(browser, frame, request, response, status,
+                                        received_content_length);
     }
   }
 

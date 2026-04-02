@@ -200,6 +200,8 @@ fn network_event_round_trips_extended_shape() {
         mime_type: Some("application/json".into()),
         request_status: Some("success".into()),
         content_length_bytes: Some(128),
+        received_content_length_bytes: Some(96),
+        duration_ms: Some(42),
         redirect_url: Some("https://example.com/login".into()),
         error_code: None,
         error_text: None,
