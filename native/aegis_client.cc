@@ -53,6 +53,16 @@ class AegisResourceRequestHandler : public CefResourceRequestHandler {
     }
   }
 
+  void OnResourceRedirect(CefRefPtr<CefBrowser> browser,
+                          CefRefPtr<CefFrame> frame,
+                          CefRefPtr<CefRequest> request,
+                          CefRefPtr<CefResponse> response,
+                          CefString& new_url) override {
+    if (delegate_) {
+      delegate_->OnResourceRedirect(browser, frame, request, response, new_url);
+    }
+  }
+
  private:
   AegisClientDelegate* delegate_;
 
@@ -164,7 +174,7 @@ CefRefPtr<CefResourceRequestHandler> AegisClient::GetResourceRequestHandler(
   return new AegisResourceRequestHandler(delegate_);
 }
 
-void AegisClient::OnLoadError(CefRefPtr<CefBrowser>,
+void AegisClient::OnLoadError(CefRefPtr<CefBrowser> browser,
                               CefRefPtr<CefFrame> frame,
                               ErrorCode errorCode,
                               const CefString& errorText,
@@ -172,6 +182,10 @@ void AegisClient::OnLoadError(CefRefPtr<CefBrowser>,
   CEF_REQUIRE_UI_THREAD();
   if (errorCode == ERR_ABORTED) {
     return;
+  }
+
+  if (delegate_) {
+    delegate_->OnLoadError(browser, frame, errorCode, errorText, failedUrl);
   }
 
   std::stringstream html;

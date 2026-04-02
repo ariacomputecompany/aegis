@@ -73,6 +73,11 @@ pub struct RecentNetworkRequestTelemetry {
     pub mime_type: Option<String>,
     pub request_status: Option<String>,
     pub content_length_bytes: Option<i64>,
+    pub redirect_url: Option<String>,
+    pub error_code: Option<i32>,
+    pub error_text: Option<String>,
+    pub is_main_frame: Option<bool>,
+    pub response_headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -409,6 +414,11 @@ impl AegisRuntime {
                 mime_type,
                 request_status,
                 content_length_bytes,
+                redirect_url,
+                error_code,
+                error_text,
+                is_main_frame,
+                response_headers,
             } => {
                 self.network_events += 1;
                 push_recent(
@@ -424,6 +434,11 @@ impl AegisRuntime {
                         mime_type: mime_type.clone(),
                         request_status: request_status.clone(),
                         content_length_bytes: *content_length_bytes,
+                        redirect_url: redirect_url.clone(),
+                        error_code: *error_code,
+                        error_text: error_text.clone(),
+                        is_main_frame: *is_main_frame,
+                        response_headers: response_headers.clone(),
                     },
                 );
             }

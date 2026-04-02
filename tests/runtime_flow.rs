@@ -200,6 +200,14 @@ fn network_event_round_trips_extended_shape() {
         mime_type: Some("application/json".into()),
         request_status: Some("success".into()),
         content_length_bytes: Some(128),
+        redirect_url: Some("https://example.com/login".into()),
+        error_code: None,
+        error_text: None,
+        is_main_frame: Some(false),
+        response_headers: Some(HashMap::from([
+            ("content-type".into(), "application/json".into()),
+            ("cache-control".into(), "no-cache".into()),
+        ]).into_iter().collect()),
     };
 
     let json = serde_json::to_string(&event).expect("event serializes");

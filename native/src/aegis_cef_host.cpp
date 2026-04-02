@@ -1006,6 +1006,26 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     PushLocalEvent(NetworkEvent(request, response, status));
   }
 
+  void OnResourceRedirect(CefRefPtr<CefBrowser>,
+                          CefRefPtr<CefFrame>,
+                          CefRefPtr<CefRequest> request,
+                          CefRefPtr<CefResponse> response,
+                          const CefString& new_url) override {
+    PushLocalEvent(NetworkEvent(request, response, UR_IO_PENDING, new_url.ToString(),
+                                std::nullopt, std::nullopt));
+  }
+
+  void OnLoadError(CefRefPtr<CefBrowser>,
+                   CefRefPtr<CefFrame> frame,
+                   CefLoadHandler::ErrorCode error_code,
+                   const CefString& error_text,
+                   const CefString& failed_url) override {
+    PushLocalEvent(NetworkEvent(nullptr, nullptr, UR_FAILED, std::nullopt,
+                                failed_url.ToString(), static_cast<int>(error_code),
+                                error_text.ToString(),
+                                frame.get() && frame->IsMain()));
+  }
+
   bool HandleBrowserProcessMessage(CefRefPtr<CefBrowser>,
                                    CefRefPtr<CefFrame>,
                                    CefProcessId source_process,
@@ -1125,9 +1145,23 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     return wrapped;
   }
 
-  CefRefPtr<CefValue> NetworkEvent(CefRefPtr<CefRequest> request,
-                                   CefRefPtr<CefResponse> response,
-                                   cef_urlrequest_status_t status) {
+  CefRefPtr<CefDictionaryValue> HeaderDictionary(const CefResponse::HeaderMap& headers) {
+    auto dict = CefDictionaryValue::Create();
+    for (const auto& [header, value] : headers) {
+      dict->SetString(header, value);
+    }
+    return dict;
+  }
+
+  CefRefPtr<CefValue> NetworkEvent(
+      CefRefPtr<CefRequest> request,
+      CefRefPtr<CefResponse> response,
+      cef_urlrequest_status_t status,
+      std::optional<std::string> redirect_url = std::nullopt,
+      std::optional<std::string> failed_url = std::nullopt,
+      std::optional<int> error_code = std::nullopt,
+      std::optional<std::string> error_text = std::nullopt,
+      std::optional<bool> is_main_frame = std::nullopt) {
     auto event = CefDictionaryValue::Create();
     auto body = CefDictionaryValue::Create();
     body->SetString("type", "network");
@@ -1144,15 +1178,32 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       response->GetHeaderMap(headers);
       auto it = headers.find("Content-Length");
       if (it != headers.end()) {
+        const auto content_length = it->second.ToString();
         char* end = nullptr;
         errno = 0;
-        const auto parsed = std::strtoll(it->second.c_str(), &end, 10);
-        if (end != it->second.c_str() && errno == 0 &&
+        const auto parsed = std::strtoll(content_length.c_str(), &end, 10);
+        if (end != content_length.c_str() && errno == 0 &&
             parsed <= std::numeric_limits<int>::max() &&
             parsed >= std::numeric_limits<int>::min()) {
           body->SetInt("content_length_bytes", static_cast<int>(parsed));
         }
       }
+      body->SetDictionary("response_headers", HeaderDictionary(headers));
+    }
+    if (redirect_url.has_value() && !redirect_url->empty()) {
+      body->SetString("redirect_url", *redirect_url);
+    }
+    if (failed_url.has_value() && !failed_url->empty()) {
+      body->SetString("url", *failed_url);
+    }
+    if (error_code.has_value()) {
+      body->SetInt("error_code", *error_code);
+    }
+    if (error_text.has_value() && !error_text->empty()) {
+      body->SetString("error_text", *error_text);
+    }
+    if (is_main_frame.has_value()) {
+      body->SetBool("is_main_frame", *is_main_frame);
     }
     body->SetString("request_status", UrlRequestStatusToString(status));
     event->SetDictionary("event", body);

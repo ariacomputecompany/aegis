@@ -34,6 +34,16 @@ class AegisClientDelegate {
                                       CefRefPtr<CefRequest> request,
                                       CefRefPtr<CefResponse> response,
                                       cef_urlrequest_status_t status) {}
+  virtual void OnResourceRedirect(CefRefPtr<CefBrowser> browser,
+                                  CefRefPtr<CefFrame> frame,
+                                  CefRefPtr<CefRequest> request,
+                                  CefRefPtr<CefResponse> response,
+                                  const CefString& new_url) {}
+  virtual void OnLoadError(CefRefPtr<CefBrowser> browser,
+                           CefRefPtr<CefFrame> frame,
+                           CefLoadHandler::ErrorCode error_code,
+                           const CefString& error_text,
+                           const CefString& failed_url) {}
 };
 
 class AegisClient : public CefClient,

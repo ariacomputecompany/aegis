@@ -83,6 +83,11 @@ export interface TelemetryResponse {
         mime_type?: string | null;
         request_status?: string | null;
         content_length_bytes?: number | null;
+        redirect_url?: string | null;
+        error_code?: number | null;
+        error_text?: string | null;
+        is_main_frame?: boolean | null;
+        response_headers?: Record<string, string> | null;
       }>;
       recent_logs: Array<{
         sequence: number;

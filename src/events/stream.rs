@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,6 +33,11 @@ pub enum RuntimeEvent {
         mime_type: Option<String>,
         request_status: Option<String>,
         content_length_bytes: Option<i64>,
+        redirect_url: Option<String>,
+        error_code: Option<i32>,
+        error_text: Option<String>,
+        is_main_frame: Option<bool>,
+        response_headers: Option<BTreeMap<String, String>>,
     },
     Log {
         level: String,
