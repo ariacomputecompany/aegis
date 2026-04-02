@@ -27,7 +27,12 @@ pub use native::{
     NativeArch, NativeConfiguration, NativeDoctor, NativePlatform, NativeStatus, app_executable,
     artifact_for_target, build_native, configure_native,
 };
-pub use runtime::executor::{AegisRuntime, ExecutionReport};
+pub use runtime::executor::{
+    AegisRuntime, DomTelemetrySummary, EventTelemetrySummary, ExecutionReport,
+    PageJsHeapTelemetry, PageNavigationTelemetry, PageResourceTelemetry, PageRuntimeTelemetry,
+    PageViewportTelemetry, RecentLogTelemetry, RecentNavigationTelemetry,
+    RecentNetworkRequestTelemetry, RuntimeTelemetrySnapshot, TraceTelemetry,
+};
 pub use session::cookies::{Cookie, SessionState};
 pub use session::profile::{SessionProfileInfo, SessionProfileStore};
 pub use session::storage::{NetworkOverride, StorageArea};

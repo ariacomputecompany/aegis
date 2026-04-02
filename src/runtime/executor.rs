@@ -1,6 +1,7 @@
 use crate::browser::BrowserConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,6 +45,128 @@ pub struct ExecutionReport {
     pub latest_event_sequence: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DomTelemetrySummary {
+    pub total_nodes: usize,
+    pub actionable_nodes: usize,
+    pub visible_nodes: usize,
+    pub disabled_nodes: usize,
+    pub text_nodes: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecentNavigationTelemetry {
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecentNetworkRequestTelemetry {
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub request_id: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecentLogTelemetry {
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub level: String,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EventTelemetrySummary {
+    pub total_events: u64,
+    pub dom_mutation_events: u64,
+    pub dom_mutation_changes: u64,
+    pub navigation_events: u64,
+    pub network_events: u64,
+    pub log_events: u64,
+    pub recent_navigations: Vec<RecentNavigationTelemetry>,
+    pub recent_network_requests: Vec<RecentNetworkRequestTelemetry>,
+    pub recent_logs: Vec<RecentLogTelemetry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageViewportTelemetry {
+    pub width: Option<u64>,
+    pub height: Option<u64>,
+    pub device_pixel_ratio: Option<f64>,
+    pub scroll_x: Option<f64>,
+    pub scroll_y: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageNavigationTelemetry {
+    pub navigation_type: Option<String>,
+    pub dom_content_loaded_ms: Option<f64>,
+    pub load_event_ms: Option<f64>,
+    pub dom_interactive_ms: Option<f64>,
+    pub response_end_ms: Option<f64>,
+    pub transfer_size_bytes: Option<u64>,
+    pub encoded_body_size_bytes: Option<u64>,
+    pub decoded_body_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResourceTelemetry {
+    pub resource_count: u64,
+    pub script_count: u64,
+    pub stylesheet_count: u64,
+    pub image_count: u64,
+    pub fetch_count: u64,
+    pub xml_http_request_count: u64,
+    pub other_count: u64,
+    pub transfer_size_bytes: Option<u64>,
+    pub encoded_body_size_bytes: Option<u64>,
+    pub decoded_body_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageJsHeapTelemetry {
+    pub used_js_heap_size_bytes: Option<u64>,
+    pub total_js_heap_size_bytes: Option<u64>,
+    pub js_heap_size_limit_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageRuntimeTelemetry {
+    pub sampled_at_ms: u64,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub ready_state: Option<String>,
+    pub origin: Option<String>,
+    pub visibility_state: Option<String>,
+    pub has_focus: Option<bool>,
+    pub viewport: PageViewportTelemetry,
+    pub navigation: PageNavigationTelemetry,
+    pub resources: PageResourceTelemetry,
+    pub js_heap: PageJsHeapTelemetry,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TraceTelemetry {
+    pub enabled: bool,
+    pub path: Option<String>,
+    pub recorded_batches: usize,
+    pub initial_session_captured: bool,
+    pub file_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeTelemetrySnapshot {
+    pub status: RuntimeStatus,
+    pub dom: DomTelemetrySummary,
+    pub events: EventTelemetrySummary,
+    pub page: Option<PageRuntimeTelemetry>,
+    pub page_capture_error: Option<String>,
+    pub trace: TraceTelemetry,
+}
+
 pub struct AegisRuntime {
     bridge: CefBridge,
     browser_config: BrowserConfig,
@@ -62,12 +185,22 @@ pub struct AegisRuntime {
     last_event_at_ms: Option<u64>,
     last_successful_command_at_ms: Option<u64>,
     last_successful_bridge_roundtrip_at_ms: Option<u64>,
+    total_events: u64,
+    dom_mutation_events: u64,
+    dom_mutation_changes: u64,
+    navigation_events: u64,
+    network_events: u64,
+    log_events: u64,
+    recent_navigations: VecDeque<RecentNavigationTelemetry>,
+    recent_network_requests: VecDeque<RecentNetworkRequestTelemetry>,
+    recent_logs: VecDeque<RecentLogTelemetry>,
 }
 
 const LIVE_STATE_REFRESH_INTERVAL_MS: u64 = 250;
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_WAIT_POLL_INTERVAL_MS: u64 = 50;
 const MIN_WAIT_POLL_INTERVAL_MS: u64 = 10;
+const RECENT_TELEMETRY_LIMIT: usize = 25;
 
 type PendingBatchFlush = (Vec<CommandResult>, Vec<SequencedEvent>, Option<DomSnapshot>);
 
@@ -95,6 +228,15 @@ impl AegisRuntime {
             last_event_at_ms: None,
             last_successful_command_at_ms: None,
             last_successful_bridge_roundtrip_at_ms: None,
+            total_events: 0,
+            dom_mutation_events: 0,
+            dom_mutation_changes: 0,
+            navigation_events: 0,
+            network_events: 0,
+            log_events: 0,
+            recent_navigations: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
+            recent_network_requests: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
+            recent_logs: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
         })
     }
 
@@ -172,6 +314,9 @@ impl AegisRuntime {
         if !events.is_empty() {
             self.last_event_at_ms = Some(now_ms());
         }
+        for event in &events {
+            self.record_event_telemetry(event);
+        }
         self.events.push_all(events.clone());
         events
     }
@@ -199,6 +344,56 @@ impl AegisRuntime {
             sequence: self.scheduler.next_event_sequence(),
             timestamp_ms: self.scheduler.next_timestamp_ms(),
             event: event.event,
+        }
+    }
+
+    fn record_event_telemetry(&mut self, event: &SequencedEvent) {
+        self.total_events += 1;
+        match &event.event {
+            RuntimeEvent::DomMutation { changes } => {
+                self.dom_mutation_events += 1;
+                self.dom_mutation_changes += changes.len() as u64;
+            }
+            RuntimeEvent::Navigation { url } => {
+                self.navigation_events += 1;
+                push_recent(
+                    &mut self.recent_navigations,
+                    RecentNavigationTelemetry {
+                        sequence: event.sequence,
+                        timestamp_ms: event.timestamp_ms,
+                        url: url.clone(),
+                    },
+                );
+            }
+            RuntimeEvent::Network { request_id, url } => {
+                self.network_events += 1;
+                push_recent(
+                    &mut self.recent_network_requests,
+                    RecentNetworkRequestTelemetry {
+                        sequence: event.sequence,
+                        timestamp_ms: event.timestamp_ms,
+                        request_id: request_id.clone(),
+                        url: url.clone(),
+                    },
+                );
+            }
+            RuntimeEvent::Log {
+                level,
+                message,
+                data,
+            } => {
+                self.log_events += 1;
+                push_recent(
+                    &mut self.recent_logs,
+                    RecentLogTelemetry {
+                        sequence: event.sequence,
+                        timestamp_ms: event.timestamp_ms,
+                        level: level.clone(),
+                        message: message.clone(),
+                        data: data.clone(),
+                    },
+                );
+            }
         }
     }
 
@@ -271,6 +466,33 @@ impl AegisRuntime {
 
     pub fn browser_config(&self) -> &BrowserConfig {
         &self.browser_config
+    }
+
+    pub fn snapshot_telemetry(&mut self) -> RuntimeTelemetrySnapshot {
+        let _ = self.drain_pending_events();
+        let _ = self.refresh_live_state(false);
+        let (page, page_capture_error) = match self.capture_page_runtime_telemetry() {
+            Ok(page) => (Some(page), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        RuntimeTelemetrySnapshot {
+            status: self.runtime_status(),
+            dom: self.build_dom_telemetry(),
+            events: EventTelemetrySummary {
+                total_events: self.total_events,
+                dom_mutation_events: self.dom_mutation_events,
+                dom_mutation_changes: self.dom_mutation_changes,
+                navigation_events: self.navigation_events,
+                network_events: self.network_events,
+                log_events: self.log_events,
+                recent_navigations: self.recent_navigations.iter().cloned().collect(),
+                recent_network_requests: self.recent_network_requests.iter().cloned().collect(),
+                recent_logs: self.recent_logs.iter().cloned().collect(),
+            },
+            page,
+            page_capture_error,
+            trace: self.trace_telemetry(),
+        }
     }
 
     pub fn runtime_status(&self) -> RuntimeStatus {
@@ -644,6 +866,157 @@ impl AegisRuntime {
         Ok(())
     }
 
+    fn capture_page_runtime_telemetry(&mut self) -> Result<PageRuntimeTelemetry, AegisError> {
+        let script = r#"(() => {
+            const nav = performance.getEntriesByType("navigation")[0];
+            const resources = performance.getEntriesByType("resource");
+            const initiatorTypes = ["script", "link", "img", "fetch", "xmlhttprequest"];
+            const summarize = (name) => resources.filter((entry) => entry.initiatorType === name).length;
+            const sum = (key) => {
+              const values = resources
+                .map((entry) => Number(entry[key] ?? 0))
+                .filter((value) => Number.isFinite(value) && value >= 0);
+              if (values.length === 0) {
+                return null;
+              }
+              return values.reduce((acc, value) => acc + value, 0);
+            };
+            const memory = performance && performance.memory ? performance.memory : null;
+            return JSON.stringify({
+              sampledAtMs: Date.now(),
+              url: window.location ? window.location.href : null,
+              title: document && document.title ? document.title : null,
+              readyState: document && document.readyState ? document.readyState : null,
+              origin: window.location ? window.location.origin : null,
+              visibilityState: document && document.visibilityState ? document.visibilityState : null,
+              hasFocus: document && typeof document.hasFocus === "function" ? document.hasFocus() : null,
+              viewport: {
+                width: typeof window.innerWidth === "number" ? window.innerWidth : null,
+                height: typeof window.innerHeight === "number" ? window.innerHeight : null,
+                devicePixelRatio: typeof window.devicePixelRatio === "number" ? window.devicePixelRatio : null,
+                scrollX: typeof window.scrollX === "number" ? window.scrollX : null,
+                scrollY: typeof window.scrollY === "number" ? window.scrollY : null
+              },
+              navigation: nav ? {
+                navigationType: nav.type ?? null,
+                domContentLoadedMs: Number.isFinite(nav.domContentLoadedEventEnd) ? nav.domContentLoadedEventEnd : null,
+                loadEventMs: Number.isFinite(nav.loadEventEnd) ? nav.loadEventEnd : null,
+                domInteractiveMs: Number.isFinite(nav.domInteractive) ? nav.domInteractive : null,
+                responseEndMs: Number.isFinite(nav.responseEnd) ? nav.responseEnd : null,
+                transferSizeBytes: Number.isFinite(nav.transferSize) ? nav.transferSize : null,
+                encodedBodySizeBytes: Number.isFinite(nav.encodedBodySize) ? nav.encodedBodySize : null,
+                decodedBodySizeBytes: Number.isFinite(nav.decodedBodySize) ? nav.decodedBodySize : null
+              } : null,
+              resources: {
+                resourceCount: resources.length,
+                scriptCount: summarize("script"),
+                stylesheetCount: summarize("link"),
+                imageCount: summarize("img"),
+                fetchCount: summarize("fetch"),
+                xmlHttpRequestCount: summarize("xmlhttprequest"),
+                otherCount: resources.filter((entry) => !initiatorTypes.includes(entry.initiatorType)).length,
+                transferSizeBytes: sum("transferSize"),
+                encodedBodySizeBytes: sum("encodedBodySize"),
+                decodedBodySizeBytes: sum("decodedBodySize")
+              },
+              jsHeap: memory ? {
+                usedJsHeapSizeBytes: Number.isFinite(memory.usedJSHeapSize) ? memory.usedJSHeapSize : null,
+                totalJsHeapSizeBytes: Number.isFinite(memory.totalJSHeapSize) ? memory.totalJSHeapSize : null,
+                jsHeapSizeLimitBytes: Number.isFinite(memory.jsHeapSizeLimit) ? memory.jsHeapSizeLimit : null
+              } : null
+            });
+        })()"#;
+        let raw = self.bridge.eval_js(script)?;
+        let value: Value = serde_json::from_str(&raw).map_err(|error| {
+            AegisError::Bridge(format!("page telemetry json parse error: {error}"))
+        })?;
+        self.mark_successful_bridge_roundtrip();
+        Ok(PageRuntimeTelemetry {
+            sampled_at_ms: value
+                .get("sampledAtMs")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(now_ms),
+            url: value.get("url").and_then(Value::as_str).map(ToOwned::to_owned),
+            title: value
+                .get("title")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            ready_state: value
+                .get("readyState")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            origin: value
+                .get("origin")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            visibility_state: value
+                .get("visibilityState")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            has_focus: value.get("hasFocus").and_then(Value::as_bool),
+            viewport: serde_json::from_value(
+                value.get("viewport").cloned().unwrap_or_else(|| json!({})),
+            )
+            .unwrap_or_default(),
+            navigation: serde_json::from_value(
+                value.get("navigation").cloned().unwrap_or_else(|| json!({})),
+            )
+            .unwrap_or_default(),
+            resources: serde_json::from_value(
+                value.get("resources").cloned().unwrap_or_else(|| json!({})),
+            )
+            .unwrap_or_default(),
+            js_heap: serde_json::from_value(
+                value.get("jsHeap").cloned().unwrap_or_else(|| json!({})),
+            )
+            .unwrap_or_default(),
+        })
+    }
+
+    fn build_dom_telemetry(&self) -> DomTelemetrySummary {
+        let snapshot = self.dom.snapshot();
+        let mut actionable_nodes = 0;
+        let mut visible_nodes = 0;
+        let mut disabled_nodes = 0;
+        let mut text_nodes = 0;
+        for node in &snapshot.nodes {
+            if node.text.as_ref().is_some_and(|text| !text.trim().is_empty()) {
+                text_nodes += 1;
+            }
+            if let Some(semantic) = node.semantic.as_ref() {
+                if semantic.actionable {
+                    actionable_nodes += 1;
+                }
+                if semantic.visible {
+                    visible_nodes += 1;
+                }
+                if semantic.disabled {
+                    disabled_nodes += 1;
+                }
+            }
+        }
+        DomTelemetrySummary {
+            total_nodes: snapshot.nodes.len(),
+            actionable_nodes,
+            visible_nodes,
+            disabled_nodes,
+            text_nodes,
+        }
+    }
+
+    fn trace_telemetry(&self) -> TraceTelemetry {
+        match self.trace_recorder.as_ref() {
+            Some(recorder) => TraceTelemetry {
+                enabled: true,
+                path: Some(recorder.path().display().to_string()),
+                recorded_batches: recorder.batch_count(),
+                initial_session_captured: recorder.has_initial_session(),
+                file_size_bytes: std::fs::metadata(recorder.path()).ok().map(|meta| meta.len()),
+            },
+            None => TraceTelemetry::default(),
+        }
+    }
+
     fn mark_successful_bridge_roundtrip(&mut self) {
         self.last_successful_bridge_roundtrip_at_ms = Some(now_ms());
     }
@@ -672,4 +1045,11 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn push_recent<T>(queue: &mut VecDeque<T>, value: T) {
+    queue.push_back(value);
+    while queue.len() > RECENT_TELEMETRY_LIMIT {
+        let _ = queue.pop_front();
+    }
 }

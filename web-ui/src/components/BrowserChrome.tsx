@@ -4,6 +4,7 @@ import { useNavigation } from "../hooks/useNavigation";
 import { Toolbar } from "./Toolbar";
 import { PageTransition } from "./PageTransition";
 import { RemoteViewport } from "./RemoteViewport";
+import { TelemetryPanel } from "./TelemetryPanel";
 
 export function BrowserChrome() {
   const state = useChromeState();
@@ -34,9 +35,12 @@ export function BrowserChrome() {
         onNavigate={nav.navigate}
       />
 
-      <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-        <RemoteViewport />
-        <PageTransition isLoading={state.isLoading} />
+      <div className="browser-shell">
+        <div style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: 0 }}>
+          <RemoteViewport />
+          <PageTransition isLoading={state.isLoading} />
+        </div>
+        <TelemetryPanel />
       </div>
     </div>
   );

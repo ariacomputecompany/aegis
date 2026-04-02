@@ -198,6 +198,7 @@ Core routes:
 
 - `GET /healthz`
 - `GET /runtime`
+- `GET /telemetry`
 - `GET /ui/bootstrap`
 - `GET /ui/chrome/state`
 - `GET /ui/vnc`
@@ -237,6 +238,22 @@ The response also includes:
 
 - `profile.profile`
 - `profile.path`
+
+### `GET /telemetry`
+
+Return the full production telemetry snapshot for the live browser session.
+
+This route is the canonical operator surface for:
+
+- runtime health and owner-thread diagnostics
+- recent operations and latency aggregates
+- DOM and event telemetry
+- page timing, resource, and JS heap telemetry sampled from the live page
+- session inventory summaries for cookies, storage, and network overrides
+- saved credential metadata and credential auto-store settings
+- trace status and dashboard transport details
+
+The telemetry route is designed to be consumed directly by the Linux dashboard now and by Quilt later.
 
 ### `POST /navigate`
 

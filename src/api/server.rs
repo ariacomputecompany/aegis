@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time::timeout;
@@ -19,18 +21,23 @@ use tokio::time::timeout;
 use crate::browser::BrowserConfig;
 use crate::commands::command::{Command, CommandTarget};
 use crate::commands::matcher::resolve_command_target as resolve_snapshot_target;
-use crate::config_store::{AegisConfigStore, AegisSecretStore, CredentialInput};
+use crate::config_store::{
+    AegisConfigStore, AegisSecretStore, CredentialInput, CredentialsSettings,
+    StoredCredentialEntry,
+};
 use crate::display::{DashboardBootstrap, LinuxDisplayStack, open_dashboard, set_display_env, spawn_linux_display_stack};
 use crate::dom::node::{DomNode, DomSnapshot};
 use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::host::LoadedAegisClient;
-use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
+use crate::runtime::executor::{ExecutionReport, RuntimeStatus, RuntimeTelemetrySnapshot};
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::{AegisError, BrowserChromeState};
 
 const IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+const RECENT_OPERATION_LIMIT: usize = 64;
+const DASHBOARD_RESOLUTION: &str = "1440x960x24";
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -54,7 +61,7 @@ impl ApiState {
         self.chrome_tx.borrow().clone()
     }
 
-    pub fn send_command(&self, command: ApiCommand) -> Result<(), mpsc::SendError<ApiCommand>> {
+    pub(crate) fn send_command(&self, command: ApiCommand) -> Result<(), mpsc::SendError<ApiCommand>> {
         self.tx.send(command)
     }
 
@@ -106,9 +113,10 @@ pub struct EventQuery {
     pub since: u64,
 }
 
-pub enum ApiCommand {
+pub(crate) enum ApiCommand {
     InjectSession(SessionState, oneshot::Sender<Result<(), AegisError>>),
     SnapshotSession(oneshot::Sender<Result<SessionState, AegisError>>),
+    SnapshotTelemetry(oneshot::Sender<Result<TelemetryResponse, AegisError>>),
     SaveSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
     LoadSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
     Navigate(
@@ -180,6 +188,8 @@ struct ServeDiagnostics {
     successful_operations: u64,
     timed_out_operations: u64,
     next_operation_id: u64,
+    recent_operations: VecDeque<CompletedOperationSnapshot>,
+    operation_aggregates: BTreeMap<String, OperationAggregateState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,7 +205,142 @@ struct RuntimeDiagnosticsResponse {
     total_operations: u64,
     successful_operations: u64,
     timed_out_operations: u64,
+    recent_operations: Vec<CompletedOperationSnapshot>,
+    operation_aggregates: Vec<OperationAggregateTelemetry>,
     runtime: RuntimeStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CompletedOperationSnapshot {
+    id: u64,
+    name: String,
+    stage: String,
+    status: String,
+    started_at_ms: u64,
+    finished_at_ms: u64,
+    elapsed_ms: u64,
+    timed_out: bool,
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct OperationLatencyHistogram {
+    lt_50_ms: u64,
+    lt_100_ms: u64,
+    lt_250_ms: u64,
+    lt_500_ms: u64,
+    lt_1000_ms: u64,
+    gte_1000_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OperationAggregateTelemetry {
+    name: String,
+    total_count: u64,
+    success_count: u64,
+    failure_count: u64,
+    timeout_count: u64,
+    avg_elapsed_ms: u64,
+    min_elapsed_ms: u64,
+    max_elapsed_ms: u64,
+    last_elapsed_ms: u64,
+    histogram: OperationLatencyHistogram,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct OperationAggregateState {
+    total_count: u64,
+    success_count: u64,
+    failure_count: u64,
+    timeout_count: u64,
+    total_elapsed_ms: u64,
+    min_elapsed_ms: u64,
+    max_elapsed_ms: u64,
+    last_elapsed_ms: u64,
+    histogram: OperationLatencyHistogram,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionCookieTelemetry {
+    name: String,
+    domain: String,
+    path: Option<String>,
+    expires_unix: Option<u64>,
+    secure: bool,
+    http_only: bool,
+    value_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionStorageEntryTelemetry {
+    key: String,
+    value_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NetworkOverrideTelemetry {
+    header: String,
+    value_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionTelemetry {
+    profile: SessionProfileInfo,
+    cookie_count: usize,
+    cookies: Vec<SessionCookieTelemetry>,
+    local_storage_count: usize,
+    local_storage: Vec<SessionStorageEntryTelemetry>,
+    session_storage_count: usize,
+    session_storage: Vec<SessionStorageEntryTelemetry>,
+    network_override_count: usize,
+    network_overrides: Vec<NetworkOverrideTelemetry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CredentialTelemetryEntry {
+    origin: String,
+    username: String,
+    username_field: Option<String>,
+    password_field: Option<String>,
+    form_label: Option<String>,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CredentialsTelemetry {
+    settings: CredentialsSettings,
+    stored_credentials_count: usize,
+    entries: Vec<CredentialTelemetryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeSettingsTelemetry {
+    default_profile: Option<String>,
+    headless_persistent: Option<bool>,
+    headful_persistent: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DashboardTelemetry {
+    headful_dashboard: bool,
+    bootstrap: Option<DashboardBootstrap>,
+    vnc_addr: Option<String>,
+    resolution: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TelemetryResponse {
+    host_library: PathBuf,
+    browser: BrowserConfig,
+    startup: ServeStartupMetrics,
+    diagnostics: RuntimeDiagnosticsResponse,
+    chrome: BrowserChromeState,
+    runtime: RuntimeTelemetrySnapshot,
+    session: SessionTelemetry,
+    credentials: CredentialsTelemetry,
+    settings: RuntimeSettingsTelemetry,
+    dashboard: DashboardTelemetry,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +425,7 @@ pub async fn serve(
         dashboard_bootstrap: display_stack.as_ref().map(LinuxDisplayStack::bootstrap),
         vnc_addr: display_stack.as_ref().map(LinuxDisplayStack::vnc_addr),
     };
+    let router_state = state.clone();
     let startup_host_library = state.host_library.clone();
 
     thread::spawn(move || {
@@ -306,7 +452,7 @@ pub async fn serve(
                 }
             };
 
-            let app = router(state);
+            let app = router(router_state);
             let _ = axum::serve(listener, app).await;
         });
     });
@@ -359,6 +505,23 @@ pub async fn serve(
                     );
                     let result = client.snapshot_session();
                     record_operation_finished(&diagnostics, "snapshot_session", &client, &result);
+                    let _ = reply.send(result);
+                }
+                ApiCommand::SnapshotTelemetry(reply) => {
+                    record_operation_started(
+                        &diagnostics,
+                        "snapshot_telemetry",
+                        "capturing production telemetry snapshot",
+                    );
+                    let result = snapshot_telemetry_response(
+                        &state,
+                        &startup,
+                        &diagnostics,
+                        &profile_store,
+                        &credential_store,
+                        &mut client,
+                    );
+                    record_operation_finished(&diagnostics, "snapshot_telemetry", &client, &result);
                     let _ = reply.send(result);
                 }
                 ApiCommand::SaveSessionProfile(reply) => {
@@ -756,6 +919,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/readyz", get(readiness))
         .route("/doctor", get(doctor))
         .route("/runtime", get(runtime_info))
+        .route("/telemetry", get(telemetry))
         .route("/session", post(inject_session).get(snapshot_session))
         .route("/session/save", post(save_session_profile))
         .route("/session/load", post(load_session_profile))
@@ -862,6 +1026,174 @@ async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>
                 total_ready_ms: 0,
             }),
     }))
+}
+
+async fn telemetry(State(state): State<ApiState>) -> Result<Json<TelemetryResponse>, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::SnapshotTelemetry(reply_tx))
+        .map_err(channel_error)?;
+    Ok(Json(
+        await_command("snapshot_telemetry", &state.diagnostics, reply_rx).await??,
+    ))
+}
+
+fn snapshot_telemetry_response(
+    state: &ApiState,
+    startup: &Arc<Mutex<ServeStartupMetrics>>,
+    diagnostics: &Arc<Mutex<ServeDiagnostics>>,
+    profile_store: &SessionProfileStore,
+    credential_store: &AegisSecretStore,
+    client: &mut LoadedAegisClient,
+) -> Result<TelemetryResponse, AegisError> {
+    let runtime = client.runtime_mut().snapshot_telemetry();
+    let session = client.snapshot_session()?;
+    let credentials_settings = AegisConfigStore::detect()
+        .and_then(|store| store.load_credentials_settings())
+        .unwrap_or(CredentialsSettings {
+            version: 1,
+            auto_store: true,
+        });
+    let credential_entries = credential_store
+        .load_profile_credentials(&profile_store.info().profile)
+        .map_err(AegisError::Bridge)?;
+    let config_store = AegisConfigStore::detect().ok();
+    Ok(TelemetryResponse {
+        host_library: state.host_library.clone(),
+        browser: state.browser.clone(),
+        startup: startup
+            .lock()
+            .map(|metrics| metrics.clone())
+            .unwrap_or(ServeStartupMetrics {
+                client_connect_ms: 0,
+                api_bind_ms: 0,
+                total_ready_ms: 0,
+            }),
+        diagnostics: read_diagnostics(diagnostics),
+        chrome: state.chrome_state_snapshot(),
+        runtime,
+        session: build_session_telemetry(profile_store.info(), session),
+        credentials: build_credentials_telemetry(credentials_settings, credential_entries),
+        settings: build_runtime_settings_telemetry(config_store.as_ref()),
+        dashboard: build_dashboard_telemetry(state),
+    })
+}
+
+fn build_session_telemetry(
+    profile: SessionProfileInfo,
+    session: SessionState,
+) -> SessionTelemetry {
+    let cookies = session
+        .cookies
+        .iter()
+        .map(|cookie| SessionCookieTelemetry {
+            name: cookie.name.clone(),
+            domain: cookie.domain.clone(),
+            path: cookie.path.clone(),
+            expires_unix: cookie.expires_unix,
+            secure: cookie.secure,
+            http_only: cookie.http_only,
+            value_bytes: cookie.value.len(),
+        })
+        .collect::<Vec<_>>();
+    let local_storage = session
+        .local_storage
+        .iter()
+        .map(|(key, value)| SessionStorageEntryTelemetry {
+            key: key.clone(),
+            value_bytes: value.len(),
+        })
+        .collect::<Vec<_>>();
+    let session_storage = session
+        .session_storage
+        .iter()
+        .map(|(key, value)| SessionStorageEntryTelemetry {
+            key: key.clone(),
+            value_bytes: value.len(),
+        })
+        .collect::<Vec<_>>();
+    let network_overrides = session
+        .network_overrides
+        .iter()
+        .map(|override_| NetworkOverrideTelemetry {
+            header: override_.header.clone(),
+            value_bytes: override_.value.len(),
+        })
+        .collect::<Vec<_>>();
+
+    SessionTelemetry {
+        profile,
+        cookie_count: cookies.len(),
+        cookies,
+        local_storage_count: local_storage.len(),
+        local_storage,
+        session_storage_count: session_storage.len(),
+        session_storage,
+        network_override_count: network_overrides.len(),
+        network_overrides,
+    }
+}
+
+fn build_credentials_telemetry(
+    settings: CredentialsSettings,
+    entries: Vec<StoredCredentialEntry>,
+) -> CredentialsTelemetry {
+    let entries = entries
+        .into_iter()
+        .map(|entry| CredentialTelemetryEntry {
+            origin: entry.origin,
+            username: entry.username,
+            username_field: entry.username_field,
+            password_field: entry.password_field,
+            form_label: entry.form_label,
+            created_at_ms: entry.created_at_ms,
+            updated_at_ms: entry.updated_at_ms,
+        })
+        .collect::<Vec<_>>();
+    CredentialsTelemetry {
+        settings,
+        stored_credentials_count: entries.len(),
+        entries,
+    }
+}
+
+fn build_runtime_settings_telemetry(
+    store: Option<&AegisConfigStore>,
+) -> RuntimeSettingsTelemetry {
+    let agent = store.and_then(|store| store.get("agent").ok().flatten());
+    let runtime = store.and_then(|store| store.get("runtime").ok().flatten());
+    RuntimeSettingsTelemetry {
+        default_profile: agent
+            .as_ref()
+            .and_then(|value| value.get("default_profile"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        headless_persistent: runtime
+            .as_ref()
+            .and_then(|value| value.get("modes"))
+            .and_then(|value| value.get("headless"))
+            .and_then(|value| value.get("persistent"))
+            .and_then(Value::as_bool),
+        headful_persistent: runtime
+            .as_ref()
+            .and_then(|value| value.get("modes"))
+            .and_then(|value| value.get("headful"))
+            .and_then(|value| value.get("persistent"))
+            .and_then(Value::as_bool),
+    }
+}
+
+fn build_dashboard_telemetry(state: &ApiState) -> DashboardTelemetry {
+    DashboardTelemetry {
+        headful_dashboard: state.dashboard_bootstrap().is_some(),
+        bootstrap: state.dashboard_bootstrap(),
+        vnc_addr: state.vnc_addr().map(|addr| addr.to_string()),
+        resolution: state
+            .dashboard_bootstrap()
+            .as_ref()
+            .map(|_| DASHBOARD_RESOLUTION.to_string()),
+    }
 }
 
 async fn readiness(
@@ -1258,6 +1590,8 @@ impl ServeDiagnostics {
             successful_operations: 0,
             timed_out_operations: 0,
             next_operation_id: 1,
+            recent_operations: VecDeque::with_capacity(RECENT_OPERATION_LIMIT),
+            operation_aggregates: BTreeMap::new(),
         }
     }
 
@@ -1274,16 +1608,30 @@ impl ServeDiagnostics {
         self.next_operation_id += 1;
     }
 
-    fn complete_success(&mut self, _name: &str, runtime: RuntimeStatus) {
+    fn complete_success(&mut self, name: &str, runtime: RuntimeStatus) {
         self.successful_operations += 1;
         self.runtime = runtime;
-        self.active_operation = None;
+        if let Some(active) = self.active_operation.take() {
+            let elapsed_ms = active.started_at.elapsed().as_millis() as u64;
+            self.record_completed_operation(CompletedOperationSnapshot {
+                id: active.id,
+                name: active.name,
+                stage: active.stage,
+                status: "success".into(),
+                started_at_ms: active.started_at_ms,
+                finished_at_ms: now_ms(),
+                elapsed_ms,
+                timed_out: active.timed_out,
+                error_message: None,
+            });
+            self.update_operation_aggregate(name, true, active.timed_out, elapsed_ms);
+        }
         self.last_failure = None;
     }
 
     fn complete_failure(
         &mut self,
-        _name: &str,
+        name: &str,
         mut failure: FailureSnapshot,
         runtime: Option<RuntimeStatus>,
     ) {
@@ -1294,7 +1642,22 @@ impl ServeDiagnostics {
             failure.first_seen_at_ms = previous.first_seen_at_ms;
         }
         self.last_failure = Some(failure);
-        self.active_operation = None;
+        if let Some(active) = self.active_operation.take() {
+            let elapsed_ms = active.started_at.elapsed().as_millis() as u64;
+            let error_message = self.last_failure.as_ref().map(|failure| failure.message.clone());
+            self.record_completed_operation(CompletedOperationSnapshot {
+                id: active.id,
+                name: active.name,
+                stage: active.stage,
+                status: "failure".into(),
+                started_at_ms: active.started_at_ms,
+                finished_at_ms: now_ms(),
+                elapsed_ms,
+                timed_out: active.timed_out,
+                error_message,
+            });
+            self.update_operation_aggregate(name, false, active.timed_out, elapsed_ms);
+        }
     }
 
     fn mark_timeout(&mut self, operation: &str, elapsed_ms: u64) {
@@ -1318,10 +1681,69 @@ impl ServeDiagnostics {
                 .unwrap_or(now),
             last_seen_at_ms: now,
         });
+        if let Some(active) = self.active_operation.take() {
+            self.record_completed_operation(CompletedOperationSnapshot {
+                id: active.id,
+                name: active.name,
+                stage: active.stage,
+                status: "timeout".into(),
+                started_at_ms: active.started_at_ms,
+                finished_at_ms: now,
+                elapsed_ms,
+                timed_out: true,
+                error_message: self.last_failure.as_ref().map(|failure| failure.message.clone()),
+            });
+            self.update_operation_aggregate(operation, false, true, elapsed_ms);
+        }
     }
 
     fn record_runtime_snapshot(&mut self, runtime: RuntimeStatus) {
         self.runtime = runtime;
+    }
+
+    fn record_completed_operation(&mut self, operation: CompletedOperationSnapshot) {
+        self.recent_operations.push_front(operation);
+        while self.recent_operations.len() > RECENT_OPERATION_LIMIT {
+            let _ = self.recent_operations.pop_back();
+        }
+    }
+
+    fn update_operation_aggregate(
+        &mut self,
+        name: &str,
+        success: bool,
+        timed_out: bool,
+        elapsed_ms: u64,
+    ) {
+        let aggregate = self
+            .operation_aggregates
+            .entry(name.to_string())
+            .or_insert_with(OperationAggregateState::default);
+        aggregate.total_count += 1;
+        if success {
+            aggregate.success_count += 1;
+        } else {
+            aggregate.failure_count += 1;
+        }
+        if timed_out {
+            aggregate.timeout_count += 1;
+        }
+        aggregate.total_elapsed_ms += elapsed_ms;
+        aggregate.last_elapsed_ms = elapsed_ms;
+        aggregate.min_elapsed_ms = if aggregate.min_elapsed_ms == 0 {
+            elapsed_ms
+        } else {
+            aggregate.min_elapsed_ms.min(elapsed_ms)
+        };
+        aggregate.max_elapsed_ms = aggregate.max_elapsed_ms.max(elapsed_ms);
+        match elapsed_ms {
+            0..=49 => aggregate.histogram.lt_50_ms += 1,
+            50..=99 => aggregate.histogram.lt_100_ms += 1,
+            100..=249 => aggregate.histogram.lt_250_ms += 1,
+            250..=499 => aggregate.histogram.lt_500_ms += 1,
+            500..=999 => aggregate.histogram.lt_1000_ms += 1,
+            _ => aggregate.histogram.gte_1000_ms += 1,
+        }
     }
 
     fn snapshot(&self) -> RuntimeDiagnosticsResponse {
@@ -1384,6 +1806,27 @@ impl ServeDiagnostics {
             total_operations: self.total_operations,
             successful_operations: self.successful_operations,
             timed_out_operations: self.timed_out_operations,
+            recent_operations: self.recent_operations.iter().cloned().collect(),
+            operation_aggregates: self
+                .operation_aggregates
+                .iter()
+                .map(|(name, aggregate)| OperationAggregateTelemetry {
+                    name: name.clone(),
+                    total_count: aggregate.total_count,
+                    success_count: aggregate.success_count,
+                    failure_count: aggregate.failure_count,
+                    timeout_count: aggregate.timeout_count,
+                    avg_elapsed_ms: if aggregate.total_count > 0 {
+                        aggregate.total_elapsed_ms / aggregate.total_count
+                    } else {
+                        0
+                    },
+                    min_elapsed_ms: aggregate.min_elapsed_ms,
+                    max_elapsed_ms: aggregate.max_elapsed_ms,
+                    last_elapsed_ms: aggregate.last_elapsed_ms,
+                    histogram: aggregate.histogram.clone(),
+                })
+                .collect(),
             runtime: self.runtime.clone(),
         }
     }

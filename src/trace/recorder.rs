@@ -75,6 +75,14 @@ impl TraceRecorder {
         &self.path
     }
 
+    pub fn batch_count(&self) -> usize {
+        self.trace.batches.len()
+    }
+
+    pub fn has_initial_session(&self) -> bool {
+        self.trace.initial_session.is_some()
+    }
+
     pub fn trace(&self) -> &TraceFile {
         &self.trace
     }

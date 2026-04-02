@@ -26,6 +26,14 @@ body {
   background: linear-gradient(180deg, #eef3f8 0%, #e4ecf5 100%);
 }
 
+.browser-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+
 input,
 button {
   font: inherit;
@@ -90,4 +98,191 @@ button {
 
 .remote-viewport__status[data-state="error"] {
   background: rgba(133, 31, 31, 0.86);
+}
+
+.telemetry-panel {
+  width: min(420px, 36vw);
+  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid rgba(33, 49, 66, 0.08);
+  background:
+    linear-gradient(180deg, rgba(247, 250, 253, 0.98), rgba(238, 244, 249, 0.98)),
+    linear-gradient(135deg, rgba(84, 124, 176, 0.08), transparent 45%);
+  box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.65);
+}
+
+.telemetry-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 18px 14px;
+  border-bottom: 1px solid rgba(33, 49, 66, 0.08);
+}
+
+.telemetry-panel__eyebrow {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: rgba(41, 69, 99, 0.64);
+  margin-bottom: 6px;
+}
+
+.telemetry-panel__title {
+  font-size: 16px;
+  line-height: 1.2;
+  color: #16304a;
+}
+
+.telemetry-panel__badge {
+  border-radius: 999px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #325273;
+  background: rgba(74, 114, 159, 0.12);
+}
+
+.telemetry-panel__badge[data-state="ready"] {
+  color: #0f5c35;
+  background: rgba(27, 158, 92, 0.14);
+}
+
+.telemetry-panel__badge[data-state="busy"] {
+  color: #825115;
+  background: rgba(211, 145, 23, 0.15);
+}
+
+.telemetry-panel__badge[data-state="wedged"],
+.telemetry-panel__badge[data-state="degraded"] {
+  color: #8e2626;
+  background: rgba(171, 41, 41, 0.14);
+}
+
+.telemetry-panel__error,
+.telemetry-panel__placeholder {
+  margin: 18px;
+  border-radius: 16px;
+  padding: 14px 16px;
+  font-size: 13px;
+  background: rgba(148, 37, 37, 0.1);
+  color: #872828;
+}
+
+.telemetry-panel__placeholder {
+  background: rgba(56, 85, 118, 0.08);
+  color: #36526f;
+}
+
+.telemetry-panel__scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 16px 18px 24px;
+}
+
+.telemetry-section {
+  margin-bottom: 20px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.68);
+  box-shadow:
+    0 12px 24px rgba(34, 49, 67, 0.06),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.56);
+}
+
+.telemetry-section h3 {
+  font-size: 14px;
+  color: #17324d;
+  margin-bottom: 12px;
+}
+
+.telemetry-section__note {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #7d3e20;
+}
+
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.telemetry-metric {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(236, 242, 247, 0.92);
+}
+
+.telemetry-metric__label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(41, 69, 99, 0.64);
+}
+
+.telemetry-metric__value {
+  display: block;
+  font-size: 13px;
+  line-height: 1.35;
+  color: #122b44;
+  word-break: break-word;
+}
+
+.telemetry-list {
+  margin-top: 14px;
+}
+
+.telemetry-list__title {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #27425d;
+}
+
+.telemetry-list__empty {
+  font-size: 12px;
+  color: rgba(41, 69, 99, 0.64);
+}
+
+.telemetry-list__item + .telemetry-list__item {
+  margin-top: 8px;
+}
+
+.telemetry-list__item {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(240, 245, 249, 0.8);
+}
+
+.telemetry-list__primary {
+  font-size: 12px;
+  line-height: 1.35;
+  color: #142f49;
+  word-break: break-word;
+}
+
+.telemetry-list__secondary {
+  margin-top: 4px;
+  font-size: 11px;
+  color: rgba(41, 69, 99, 0.7);
+}
+
+@media (max-width: 1180px) {
+  .browser-shell {
+    flex-direction: column;
+  }
+
+  .telemetry-panel {
+    width: 100%;
+    min-width: 0;
+    max-height: 42%;
+    border-left: 0;
+    border-top: 1px solid rgba(33, 49, 66, 0.08);
+  }
 }
