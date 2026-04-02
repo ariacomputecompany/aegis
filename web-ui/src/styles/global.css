@@ -211,6 +211,10 @@ button {
   gap: 10px;
 }
 
+.telemetry-grid--spaced {
+  margin-top: 10px;
+}
+
 .telemetry-metric {
   padding: 10px 12px;
   border-radius: 14px;

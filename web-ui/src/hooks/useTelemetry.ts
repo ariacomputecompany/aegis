@@ -125,6 +125,26 @@ export interface TelemetryResponse {
         total_js_heap_size_bytes?: number | null;
         js_heap_size_limit_bytes?: number | null;
       };
+      paint: {
+        first_paint_ms?: number | null;
+        first_contentful_paint_ms?: number | null;
+        largest_contentful_paint_ms?: number | null;
+        largest_contentful_paint_size?: number | null;
+      };
+      stability: {
+        cumulative_layout_shift?: number | null;
+        layout_shift_count: number;
+      };
+      responsiveness: {
+        long_task_count: number;
+        long_task_total_duration_ms?: number | null;
+        long_task_max_duration_ms?: number | null;
+        event_count: number;
+        interaction_count: number;
+        total_event_duration_ms?: number | null;
+        max_event_duration_ms?: number | null;
+        first_input_delay_ms?: number | null;
+      };
     } | null;
     page_capture_error?: string | null;
     trace: {

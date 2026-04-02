@@ -134,6 +134,32 @@ pub struct PageJsHeapTelemetry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PagePaintTelemetry {
+    pub first_paint_ms: Option<f64>,
+    pub first_contentful_paint_ms: Option<f64>,
+    pub largest_contentful_paint_ms: Option<f64>,
+    pub largest_contentful_paint_size: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageStabilityTelemetry {
+    pub cumulative_layout_shift: Option<f64>,
+    pub layout_shift_count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResponsivenessTelemetry {
+    pub long_task_count: u64,
+    pub long_task_total_duration_ms: Option<f64>,
+    pub long_task_max_duration_ms: Option<f64>,
+    pub event_count: u64,
+    pub interaction_count: u64,
+    pub total_event_duration_ms: Option<f64>,
+    pub max_event_duration_ms: Option<f64>,
+    pub first_input_delay_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PageRuntimeTelemetry {
     pub sampled_at_ms: u64,
     pub url: Option<String>,
@@ -146,6 +172,9 @@ pub struct PageRuntimeTelemetry {
     pub navigation: PageNavigationTelemetry,
     pub resources: PageResourceTelemetry,
     pub js_heap: PageJsHeapTelemetry,
+    pub paint: PagePaintTelemetry,
+    pub stability: PageStabilityTelemetry,
+    pub responsiveness: PageResponsivenessTelemetry,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -429,6 +458,7 @@ impl AegisRuntime {
         let raw_events = self.bridge.drain_events()?;
         self.mark_successful_bridge_roundtrip();
         let _ = self.apply_event_batch(raw_events);
+        let _ = self.ensure_page_telemetry_probe();
         let _ = self.refresh_live_state(true);
         Ok(())
     }
@@ -840,6 +870,7 @@ impl AegisRuntime {
             return Ok(());
         }
 
+        let _ = self.ensure_page_telemetry_probe();
         let script = r#"JSON.stringify({
             url: window.location ? window.location.href : null,
             title: document.title || null,
@@ -866,10 +897,118 @@ impl AegisRuntime {
         Ok(())
     }
 
+    fn ensure_page_telemetry_probe(&mut self) -> Result<(), AegisError> {
+        let script = r#"(() => {
+            const telemetry = window.__aegisTelemetry = window.__aegisTelemetry || {
+              installedAtMs: Date.now(),
+              observersInstalled: false,
+              cumulativeLayoutShift: 0,
+              layoutShiftCount: 0,
+              largestContentfulPaintMs: null,
+              largestContentfulPaintSize: null,
+              longTaskCount: 0,
+              longTaskTotalDurationMs: 0,
+              longTaskMaxDurationMs: 0,
+              eventCount: 0,
+              interactionCount: 0,
+              totalEventDurationMs: 0,
+              maxEventDurationMs: 0,
+              firstInputDelayMs: null,
+              interactionIds: {}
+            };
+            if (telemetry.observersInstalled) {
+              return "ok";
+            }
+
+            const observe = (type, handler) => {
+              try {
+                const observer = new PerformanceObserver((list) => handler(list.getEntries()));
+                observer.observe({ type, buffered: true });
+                return true;
+              } catch (_error) {
+                return false;
+              }
+            };
+
+            observe("largest-contentful-paint", (entries) => {
+              for (const entry of entries) {
+                if (Number.isFinite(entry.startTime)) {
+                  telemetry.largestContentfulPaintMs = entry.startTime;
+                }
+                if (Number.isFinite(entry.size)) {
+                  telemetry.largestContentfulPaintSize = entry.size;
+                }
+              }
+            });
+
+            observe("layout-shift", (entries) => {
+              for (const entry of entries) {
+                if (entry.hadRecentInput) {
+                  continue;
+                }
+                if (Number.isFinite(entry.value)) {
+                  telemetry.cumulativeLayoutShift += entry.value;
+                  telemetry.layoutShiftCount += 1;
+                }
+              }
+            });
+
+            observe("longtask", (entries) => {
+              for (const entry of entries) {
+                const duration = Number(entry.duration ?? 0);
+                if (!Number.isFinite(duration) || duration < 0) {
+                  continue;
+                }
+                telemetry.longTaskCount += 1;
+                telemetry.longTaskTotalDurationMs += duration;
+                telemetry.longTaskMaxDurationMs = Math.max(telemetry.longTaskMaxDurationMs, duration);
+              }
+            });
+
+            observe("event", (entries) => {
+              for (const entry of entries) {
+                const duration = Number(entry.duration ?? 0);
+                if (Number.isFinite(duration) && duration >= 0) {
+                  telemetry.eventCount += 1;
+                  telemetry.totalEventDurationMs += duration;
+                  telemetry.maxEventDurationMs = Math.max(telemetry.maxEventDurationMs, duration);
+                }
+                if (Number.isFinite(entry.interactionId) && entry.interactionId > 0) {
+                  const key = String(entry.interactionId);
+                  if (!telemetry.interactionIds[key]) {
+                    telemetry.interactionIds[key] = true;
+                    telemetry.interactionCount += 1;
+                  }
+                }
+              }
+            });
+
+            observe("first-input", (entries) => {
+              for (const entry of entries) {
+                const delay = Number(entry.processingStart ?? 0) - Number(entry.startTime ?? 0);
+                if (!Number.isFinite(delay) || delay < 0) {
+                  continue;
+                }
+                if (telemetry.firstInputDelayMs == null || delay < telemetry.firstInputDelayMs) {
+                  telemetry.firstInputDelayMs = delay;
+                }
+              }
+            });
+
+            telemetry.observersInstalled = true;
+            return "installed";
+        })()"#;
+        let _ = self.bridge.eval_js(script)?;
+        self.mark_successful_bridge_roundtrip();
+        Ok(())
+    }
+
     fn capture_page_runtime_telemetry(&mut self) -> Result<PageRuntimeTelemetry, AegisError> {
+        let _ = self.ensure_page_telemetry_probe();
         let script = r#"(() => {
             const nav = performance.getEntriesByType("navigation")[0];
             const resources = performance.getEntriesByType("resource");
+            const paints = performance.getEntriesByType("paint");
             const initiatorTypes = ["script", "link", "img", "fetch", "xmlhttprequest"];
             const summarize = (name) => resources.filter((entry) => entry.initiatorType === name).length;
             const sum = (key) => {
@@ -882,6 +1021,11 @@ impl AegisRuntime {
               return values.reduce((acc, value) => acc + value, 0);
             };
             const memory = performance && performance.memory ? performance.memory : null;
+            const pageTelemetry = window.__aegisTelemetry || null;
+            const paintValue = (name) => {
+              const entry = paints.find((candidate) => candidate.name === name);
+              return entry && Number.isFinite(entry.startTime) ? entry.startTime : null;
+            };
             return JSON.stringify({
               sampledAtMs: Date.now(),
               url: window.location ? window.location.href : null,
@@ -923,7 +1067,51 @@ impl AegisRuntime {
                 usedJsHeapSizeBytes: Number.isFinite(memory.usedJSHeapSize) ? memory.usedJSHeapSize : null,
                 totalJsHeapSizeBytes: Number.isFinite(memory.totalJSHeapSize) ? memory.totalJSHeapSize : null,
                 jsHeapSizeLimitBytes: Number.isFinite(memory.jsHeapSizeLimit) ? memory.jsHeapSizeLimit : null
-              } : null
+              } : null,
+              paint: {
+                firstPaintMs: paintValue("first-paint"),
+                firstContentfulPaintMs: paintValue("first-contentful-paint"),
+                largestContentfulPaintMs: pageTelemetry && Number.isFinite(pageTelemetry.largestContentfulPaintMs)
+                  ? pageTelemetry.largestContentfulPaintMs
+                  : null,
+                largestContentfulPaintSize: pageTelemetry && Number.isFinite(pageTelemetry.largestContentfulPaintSize)
+                  ? pageTelemetry.largestContentfulPaintSize
+                  : null
+              },
+              stability: {
+                cumulativeLayoutShift: pageTelemetry && Number.isFinite(pageTelemetry.cumulativeLayoutShift)
+                  ? pageTelemetry.cumulativeLayoutShift
+                  : null,
+                layoutShiftCount: pageTelemetry && Number.isFinite(pageTelemetry.layoutShiftCount)
+                  ? pageTelemetry.layoutShiftCount
+                  : 0
+              },
+              responsiveness: {
+                longTaskCount: pageTelemetry && Number.isFinite(pageTelemetry.longTaskCount)
+                  ? pageTelemetry.longTaskCount
+                  : 0,
+                longTaskTotalDurationMs: pageTelemetry && Number.isFinite(pageTelemetry.longTaskTotalDurationMs)
+                  ? pageTelemetry.longTaskTotalDurationMs
+                  : null,
+                longTaskMaxDurationMs: pageTelemetry && Number.isFinite(pageTelemetry.longTaskMaxDurationMs)
+                  ? pageTelemetry.longTaskMaxDurationMs
+                  : null,
+                eventCount: pageTelemetry && Number.isFinite(pageTelemetry.eventCount)
+                  ? pageTelemetry.eventCount
+                  : 0,
+                interactionCount: pageTelemetry && Number.isFinite(pageTelemetry.interactionCount)
+                  ? pageTelemetry.interactionCount
+                  : 0,
+                totalEventDurationMs: pageTelemetry && Number.isFinite(pageTelemetry.totalEventDurationMs)
+                  ? pageTelemetry.totalEventDurationMs
+                  : null,
+                maxEventDurationMs: pageTelemetry && Number.isFinite(pageTelemetry.maxEventDurationMs)
+                  ? pageTelemetry.maxEventDurationMs
+                  : null,
+                firstInputDelayMs: pageTelemetry && Number.isFinite(pageTelemetry.firstInputDelayMs)
+                  ? pageTelemetry.firstInputDelayMs
+                  : null
+              }
             });
         })()"#;
         let raw = self.bridge.eval_js(script)?;
@@ -968,6 +1156,20 @@ impl AegisRuntime {
             .unwrap_or_default(),
             js_heap: serde_json::from_value(
                 value.get("jsHeap").cloned().unwrap_or_else(|| json!({})),
+            )
+            .unwrap_or_default(),
+            paint: serde_json::from_value(
+                value.get("paint").cloned().unwrap_or_else(|| json!({})),
+            )
+            .unwrap_or_default(),
+            stability: serde_json::from_value(
+                value.get("stability").cloned().unwrap_or_else(|| json!({})),
+            )
+            .unwrap_or_default(),
+            responsiveness: serde_json::from_value(
+                value.get("responsiveness")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
             )
             .unwrap_or_default(),
         })

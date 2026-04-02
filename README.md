@@ -248,7 +248,7 @@ This route is the canonical operator surface for:
 - runtime health and owner-thread diagnostics
 - recent operations and latency aggregates
 - DOM and event telemetry
-- page timing, resource, and JS heap telemetry sampled from the live page
+- page timing, paint, layout stability, responsiveness, resource, and JS heap telemetry sampled from the live page
 - session inventory summaries for cookies, storage, and network overrides
 - saved credential metadata and credential auto-store settings
 - trace status and dashboard transport details

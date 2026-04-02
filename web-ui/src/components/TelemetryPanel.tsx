@@ -119,6 +119,52 @@ export function TelemetryPanel() {
                   value={formatTime(data.runtime.page?.sampled_at_ms)}
                 />
               </div>
+              <div className="telemetry-grid telemetry-grid--spaced">
+                <Metric
+                  label="First paint"
+                  value={formatMs(data.runtime.page?.paint.first_paint_ms)}
+                />
+                <Metric
+                  label="FCP"
+                  value={formatMs(data.runtime.page?.paint.first_contentful_paint_ms)}
+                />
+                <Metric
+                  label="LCP"
+                  value={formatMs(data.runtime.page?.paint.largest_contentful_paint_ms)}
+                />
+                <Metric
+                  label="LCP size"
+                  value={formatBytes(data.runtime.page?.paint.largest_contentful_paint_size)}
+                />
+                <Metric
+                  label="CLS"
+                  value={
+                    data.runtime.page?.stability.cumulative_layout_shift != null
+                      ? data.runtime.page.stability.cumulative_layout_shift.toFixed(3)
+                      : "n/a"
+                  }
+                />
+                <Metric
+                  label="Layout shifts"
+                  value={String(data.runtime.page?.stability.layout_shift_count ?? 0)}
+                />
+                <Metric
+                  label="Long tasks"
+                  value={String(data.runtime.page?.responsiveness.long_task_count ?? 0)}
+                />
+                <Metric
+                  label="Worst long task"
+                  value={formatMs(data.runtime.page?.responsiveness.long_task_max_duration_ms)}
+                />
+                <Metric
+                  label="Interactions"
+                  value={String(data.runtime.page?.responsiveness.interaction_count ?? 0)}
+                />
+                <Metric
+                  label="First input delay"
+                  value={formatMs(data.runtime.page?.responsiveness.first_input_delay_ms)}
+                />
+              </div>
               {data.runtime.page_capture_error ? (
                 <p className="telemetry-section__note">{data.runtime.page_capture_error}</p>
               ) : null}
