@@ -137,11 +137,46 @@ pub struct NetworkTelemetrySummary {
     pub transferred_bytes: u64,
     pub avg_duration_ms: Option<u64>,
     pub max_duration_ms: Option<u64>,
+    pub cache: NetworkCacheTelemetrySummary,
+    pub security: NetworkSecurityTelemetrySummary,
     pub method_breakdown: Vec<NetworkBreakdownTelemetry>,
     pub mime_breakdown: Vec<NetworkBreakdownTelemetry>,
     pub status_code_breakdown: Vec<NetworkBreakdownTelemetry>,
     pub top_errors: Vec<NetworkBreakdownTelemetry>,
     pub top_domains: Vec<NetworkDomainTelemetry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkCacheTelemetrySummary {
+    pub cache_control_present: u64,
+    pub no_store_responses: u64,
+    pub no_cache_responses: u64,
+    pub public_cacheable_responses: u64,
+    pub private_cacheable_responses: u64,
+    pub max_age_responses: u64,
+    pub etag_responses: u64,
+    pub last_modified_responses: u64,
+    pub vary_responses: u64,
+    pub age_responses: u64,
+    pub content_encoding_breakdown: Vec<NetworkBreakdownTelemetry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkSecurityTelemetrySummary {
+    pub https_requests: u64,
+    pub http_requests: u64,
+    pub other_scheme_requests: u64,
+    pub mixed_content_requests: u64,
+    pub hsts_responses: u64,
+    pub csp_responses: u64,
+    pub x_frame_options_responses: u64,
+    pub x_content_type_options_responses: u64,
+    pub referrer_policy_responses: u64,
+    pub permissions_policy_responses: u64,
+    pub coop_responses: u64,
+    pub coep_responses: u64,
+    pub corp_responses: u64,
+    pub insecure_main_frame_requests: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -307,6 +342,31 @@ pub struct AegisRuntime {
     network_mime_types: BTreeMap<String, NetworkBreakdownAggregate>,
     network_status_codes: BTreeMap<String, NetworkBreakdownAggregate>,
     network_errors: BTreeMap<String, NetworkBreakdownAggregate>,
+    network_content_encodings: BTreeMap<String, NetworkBreakdownAggregate>,
+    cache_control_present_responses: u64,
+    cache_no_store_responses: u64,
+    cache_no_cache_responses: u64,
+    cache_public_responses: u64,
+    cache_private_responses: u64,
+    cache_max_age_responses: u64,
+    cache_etag_responses: u64,
+    cache_last_modified_responses: u64,
+    cache_vary_responses: u64,
+    cache_age_responses: u64,
+    https_requests: u64,
+    http_requests: u64,
+    other_scheme_requests: u64,
+    mixed_content_requests: u64,
+    hsts_responses: u64,
+    csp_responses: u64,
+    x_frame_options_responses: u64,
+    x_content_type_options_responses: u64,
+    referrer_policy_responses: u64,
+    permissions_policy_responses: u64,
+    coop_responses: u64,
+    coep_responses: u64,
+    corp_responses: u64,
+    insecure_main_frame_requests: u64,
     recent_navigations: VecDeque<RecentNavigationTelemetry>,
     recent_network_requests: VecDeque<RecentNetworkRequestTelemetry>,
     recent_logs: VecDeque<RecentLogTelemetry>,
@@ -368,6 +428,31 @@ impl AegisRuntime {
             network_mime_types: BTreeMap::new(),
             network_status_codes: BTreeMap::new(),
             network_errors: BTreeMap::new(),
+            network_content_encodings: BTreeMap::new(),
+            cache_control_present_responses: 0,
+            cache_no_store_responses: 0,
+            cache_no_cache_responses: 0,
+            cache_public_responses: 0,
+            cache_private_responses: 0,
+            cache_max_age_responses: 0,
+            cache_etag_responses: 0,
+            cache_last_modified_responses: 0,
+            cache_vary_responses: 0,
+            cache_age_responses: 0,
+            https_requests: 0,
+            http_requests: 0,
+            other_scheme_requests: 0,
+            mixed_content_requests: 0,
+            hsts_responses: 0,
+            csp_responses: 0,
+            x_frame_options_responses: 0,
+            x_content_type_options_responses: 0,
+            referrer_policy_responses: 0,
+            permissions_policy_responses: 0,
+            coop_responses: 0,
+            coep_responses: 0,
+            corp_responses: 0,
+            insecure_main_frame_requests: 0,
             recent_navigations: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
             recent_network_requests: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
             recent_logs: VecDeque::with_capacity(RECENT_TELEMETRY_LIMIT),
@@ -546,13 +631,21 @@ impl AegisRuntime {
                 {
                     self.transferred_network_bytes += bytes;
                 }
-                if let Some(method) = method.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+                if let Some(method) = method
+                    .as_ref()
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                {
                     self.network_methods
                         .entry(method.to_ascii_uppercase())
                         .or_default()
                         .count += 1;
                 }
-                if let Some(mime_type) = mime_type.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+                if let Some(mime_type) = mime_type
+                    .as_ref()
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                {
                     self.network_mime_types
                         .entry(normalize_mime_group(mime_type))
                         .or_default()
@@ -596,6 +689,83 @@ impl AegisRuntime {
                         aggregate.total_duration_ms += *duration_ms;
                         aggregate.duration_count += 1;
                         aggregate.max_duration_ms = aggregate.max_duration_ms.max(*duration_ms);
+                    }
+                }
+                match url_scheme(url) {
+                    Some("https") => self.https_requests += 1,
+                    Some("http") => self.http_requests += 1,
+                    Some(_) => self.other_scheme_requests += 1,
+                    None => {}
+                }
+                if is_mixed_content_request(self.current_url.as_deref(), url) {
+                    self.mixed_content_requests += 1;
+                }
+                if is_main_frame == &Some(true) && matches!(url_scheme(url), Some("http")) {
+                    self.insecure_main_frame_requests += 1;
+                }
+                if let Some(headers) = response_headers.as_ref() {
+                    if let Some(cache_control) = find_header(headers, "cache-control") {
+                        self.cache_control_present_responses += 1;
+                        if cache_control_token_present(cache_control, "no-store") {
+                            self.cache_no_store_responses += 1;
+                        }
+                        if cache_control_token_present(cache_control, "no-cache") {
+                            self.cache_no_cache_responses += 1;
+                        }
+                        if cache_control_token_present(cache_control, "public") {
+                            self.cache_public_responses += 1;
+                        }
+                        if cache_control_token_present(cache_control, "private") {
+                            self.cache_private_responses += 1;
+                        }
+                        if cache_control_has_max_age(cache_control) {
+                            self.cache_max_age_responses += 1;
+                        }
+                    }
+                    if find_header(headers, "etag").is_some() {
+                        self.cache_etag_responses += 1;
+                    }
+                    if find_header(headers, "last-modified").is_some() {
+                        self.cache_last_modified_responses += 1;
+                    }
+                    if find_header(headers, "vary").is_some() {
+                        self.cache_vary_responses += 1;
+                    }
+                    if find_header(headers, "age").is_some() {
+                        self.cache_age_responses += 1;
+                    }
+                    if let Some(content_encoding) = find_header(headers, "content-encoding") {
+                        self.network_content_encodings
+                            .entry(normalize_header_value_group(content_encoding))
+                            .or_default()
+                            .count += 1;
+                    }
+                    if find_header(headers, "strict-transport-security").is_some() {
+                        self.hsts_responses += 1;
+                    }
+                    if find_header(headers, "content-security-policy").is_some() {
+                        self.csp_responses += 1;
+                    }
+                    if find_header(headers, "x-frame-options").is_some() {
+                        self.x_frame_options_responses += 1;
+                    }
+                    if find_header(headers, "x-content-type-options").is_some() {
+                        self.x_content_type_options_responses += 1;
+                    }
+                    if find_header(headers, "referrer-policy").is_some() {
+                        self.referrer_policy_responses += 1;
+                    }
+                    if find_header(headers, "permissions-policy").is_some() {
+                        self.permissions_policy_responses += 1;
+                    }
+                    if find_header(headers, "cross-origin-opener-policy").is_some() {
+                        self.coop_responses += 1;
+                    }
+                    if find_header(headers, "cross-origin-embedder-policy").is_some() {
+                        self.coep_responses += 1;
+                    }
+                    if find_header(headers, "cross-origin-resource-policy").is_some() {
+                        self.corp_responses += 1;
                     }
                 }
                 push_recent(
@@ -1340,7 +1510,10 @@ impl AegisRuntime {
                 .get("sampledAtMs")
                 .and_then(Value::as_u64)
                 .unwrap_or_else(now_ms),
-            url: value.get("url").and_then(Value::as_str).map(ToOwned::to_owned),
+            url: value
+                .get("url")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
             title: value
                 .get("title")
                 .and_then(Value::as_str)
@@ -1363,7 +1536,10 @@ impl AegisRuntime {
             )
             .unwrap_or_default(),
             navigation: serde_json::from_value(
-                value.get("navigation").cloned().unwrap_or_else(|| json!({})),
+                value
+                    .get("navigation")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
             )
             .unwrap_or_default(),
             resources: serde_json::from_value(
@@ -1374,16 +1550,15 @@ impl AegisRuntime {
                 value.get("jsHeap").cloned().unwrap_or_else(|| json!({})),
             )
             .unwrap_or_default(),
-            paint: serde_json::from_value(
-                value.get("paint").cloned().unwrap_or_else(|| json!({})),
-            )
-            .unwrap_or_default(),
+            paint: serde_json::from_value(value.get("paint").cloned().unwrap_or_else(|| json!({})))
+                .unwrap_or_default(),
             stability: serde_json::from_value(
                 value.get("stability").cloned().unwrap_or_else(|| json!({})),
             )
             .unwrap_or_default(),
             responsiveness: serde_json::from_value(
-                value.get("responsiveness")
+                value
+                    .get("responsiveness")
                     .cloned()
                     .unwrap_or_else(|| json!({})),
             )
@@ -1398,7 +1573,11 @@ impl AegisRuntime {
         let mut disabled_nodes = 0;
         let mut text_nodes = 0;
         for node in &snapshot.nodes {
-            if node.text.as_ref().is_some_and(|text| !text.trim().is_empty()) {
+            if node
+                .text
+                .as_ref()
+                .is_some_and(|text| !text.trim().is_empty())
+            {
                 text_nodes += 1;
             }
             if let Some(semantic) = node.semantic.as_ref() {
@@ -1429,7 +1608,9 @@ impl AegisRuntime {
                 path: Some(recorder.path().display().to_string()),
                 recorded_batches: recorder.batch_count(),
                 initial_session_captured: recorder.has_initial_session(),
-                file_size_bytes: std::fs::metadata(recorder.path()).ok().map(|meta| meta.len()),
+                file_size_bytes: std::fs::metadata(recorder.path())
+                    .ok()
+                    .map(|meta| meta.len()),
             },
             None => TraceTelemetry::default(),
         }
@@ -1478,6 +1659,9 @@ impl AegisRuntime {
         let mut top_errors = breakdown_from_map(&self.network_errors);
         top_errors.truncate(6);
 
+        let mut content_encoding_breakdown = breakdown_from_map(&self.network_content_encodings);
+        content_encoding_breakdown.truncate(6);
+
         NetworkTelemetrySummary {
             total_requests: self.network_events,
             successful_requests: self.successful_network_requests,
@@ -1499,6 +1683,35 @@ impl AegisRuntime {
                 Some(self.max_network_duration_ms)
             } else {
                 None
+            },
+            cache: NetworkCacheTelemetrySummary {
+                cache_control_present: self.cache_control_present_responses,
+                no_store_responses: self.cache_no_store_responses,
+                no_cache_responses: self.cache_no_cache_responses,
+                public_cacheable_responses: self.cache_public_responses,
+                private_cacheable_responses: self.cache_private_responses,
+                max_age_responses: self.cache_max_age_responses,
+                etag_responses: self.cache_etag_responses,
+                last_modified_responses: self.cache_last_modified_responses,
+                vary_responses: self.cache_vary_responses,
+                age_responses: self.cache_age_responses,
+                content_encoding_breakdown,
+            },
+            security: NetworkSecurityTelemetrySummary {
+                https_requests: self.https_requests,
+                http_requests: self.http_requests,
+                other_scheme_requests: self.other_scheme_requests,
+                mixed_content_requests: self.mixed_content_requests,
+                hsts_responses: self.hsts_responses,
+                csp_responses: self.csp_responses,
+                x_frame_options_responses: self.x_frame_options_responses,
+                x_content_type_options_responses: self.x_content_type_options_responses,
+                referrer_policy_responses: self.referrer_policy_responses,
+                permissions_policy_responses: self.permissions_policy_responses,
+                coop_responses: self.coop_responses,
+                coep_responses: self.coep_responses,
+                corp_responses: self.corp_responses,
+                insecure_main_frame_requests: self.insecure_main_frame_requests,
             },
             method_breakdown,
             mime_breakdown,
@@ -1608,4 +1821,95 @@ fn breakdown_from_map(
             .then_with(|| left.key.cmp(&right.key))
     });
     breakdown
+}
+
+fn url_scheme(url: &str) -> Option<&str> {
+    let (scheme, _) = url.split_once("://")?;
+    Some(scheme)
+}
+
+fn is_mixed_content_request(current_page_url: Option<&str>, request_url: &str) -> bool {
+    matches!(
+        url_scheme(current_page_url.unwrap_or_default()),
+        Some("https")
+    ) && matches!(url_scheme(request_url), Some("http"))
+}
+
+fn find_header<'a>(headers: &'a BTreeMap<String, String>, needle: &str) -> Option<&'a str> {
+    headers.iter().find_map(|(key, value)| {
+        key.eq_ignore_ascii_case(needle)
+            .then_some(value.as_str())
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
+fn cache_control_token_present(cache_control: &str, token: &str) -> bool {
+    cache_control
+        .split(',')
+        .map(|part| part.trim())
+        .any(|part| part.eq_ignore_ascii_case(token))
+}
+
+fn cache_control_has_max_age(cache_control: &str) -> bool {
+    cache_control
+        .split(',')
+        .map(|part| part.trim())
+        .any(|part| part.len() >= 7 && part[..7].eq_ignore_ascii_case("max-age"))
+}
+
+fn normalize_header_value_group(value: &str) -> String {
+    value
+        .split(',')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        cache_control_has_max_age, cache_control_token_present, is_mixed_content_request,
+        normalize_header_value_group,
+    };
+
+    #[test]
+    fn cache_control_token_matching_is_case_insensitive() {
+        assert!(cache_control_token_present(
+            "public, max-age=60, no-store",
+            "no-store"
+        ));
+        assert!(cache_control_token_present("No-Cache", "no-cache"));
+        assert!(!cache_control_token_present("public, immutable", "private"));
+    }
+
+    #[test]
+    fn cache_control_detects_max_age_directive() {
+        assert!(cache_control_has_max_age("public, max-age=3600"));
+        assert!(cache_control_has_max_age("MAX-AGE=60"));
+        assert!(!cache_control_has_max_age("public, immutable"));
+    }
+
+    #[test]
+    fn mixed_content_detection_uses_page_and_request_scheme() {
+        assert!(is_mixed_content_request(
+            Some("https://app.example.com"),
+            "http://cdn.example.com/script.js"
+        ));
+        assert!(!is_mixed_content_request(
+            Some("http://app.example.com"),
+            "http://cdn.example.com/script.js"
+        ));
+        assert!(!is_mixed_content_request(
+            Some("https://app.example.com"),
+            "https://cdn.example.com/script.js"
+        ));
+    }
+
+    #[test]
+    fn header_value_group_normalizes_first_encoding() {
+        assert_eq!(normalize_header_value_group("br"), "br");
+        assert_eq!(normalize_header_value_group("gzip, br"), "gzip");
+        assert_eq!(normalize_header_value_group(" ZSTD "), "zstd");
+    }
 }

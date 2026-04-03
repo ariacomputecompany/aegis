@@ -252,6 +252,34 @@ export function TelemetryPanel() {
                   value={`${data.runtime.events.network_summary.client_error_responses}/${data.runtime.events.network_summary.server_error_responses}`}
                 />
               </div>
+              <div className="telemetry-grid telemetry-grid--spaced">
+                <Metric
+                  label="HTTPS reqs"
+                  value={String(data.runtime.events.network_summary.security.https_requests)}
+                />
+                <Metric
+                  label="HTTP reqs"
+                  value={String(data.runtime.events.network_summary.security.http_requests)}
+                />
+                <Metric
+                  label="Mixed content"
+                  value={String(data.runtime.events.network_summary.security.mixed_content_requests)}
+                />
+                <Metric
+                  label="Insecure main-frame"
+                  value={String(
+                    data.runtime.events.network_summary.security.insecure_main_frame_requests,
+                  )}
+                />
+                <Metric
+                  label="Cache-Control"
+                  value={String(data.runtime.events.network_summary.cache.cache_control_present)}
+                />
+                <Metric
+                  label="ETag"
+                  value={String(data.runtime.events.network_summary.cache.etag_responses)}
+                />
+              </div>
               <TelemetryList
                 title="Top domains"
                 items={data.runtime.events.network_summary.top_domains.map((item) => ({
@@ -295,6 +323,97 @@ export function TelemetryPanel() {
                   primary: item.key,
                   secondary: `${item.count} occurrences`,
                 }))}
+              />
+              <TelemetryList
+                title="Content encodings"
+                items={data.runtime.events.network_summary.cache.content_encoding_breakdown.map(
+                  (item) => ({
+                    key: item.key,
+                    primary: item.key,
+                    secondary: `${item.count} responses`,
+                  }),
+                )}
+              />
+              <TelemetryList
+                title="Security headers"
+                items={[
+                  {
+                    key: "hsts",
+                    primary: "Strict-Transport-Security",
+                    secondary: `${data.runtime.events.network_summary.security.hsts_responses} responses`,
+                  },
+                  {
+                    key: "csp",
+                    primary: "Content-Security-Policy",
+                    secondary: `${data.runtime.events.network_summary.security.csp_responses} responses`,
+                  },
+                  {
+                    key: "xfo",
+                    primary: "X-Frame-Options",
+                    secondary: `${data.runtime.events.network_summary.security.x_frame_options_responses} responses`,
+                  },
+                  {
+                    key: "xcto",
+                    primary: "X-Content-Type-Options",
+                    secondary: `${data.runtime.events.network_summary.security.x_content_type_options_responses} responses`,
+                  },
+                  {
+                    key: "referrer-policy",
+                    primary: "Referrer-Policy",
+                    secondary: `${data.runtime.events.network_summary.security.referrer_policy_responses} responses`,
+                  },
+                  {
+                    key: "permissions-policy",
+                    primary: "Permissions-Policy",
+                    secondary: `${data.runtime.events.network_summary.security.permissions_policy_responses} responses`,
+                  },
+                  {
+                    key: "coop-coep-corp",
+                    primary: "COOP / COEP / CORP",
+                    secondary:
+                      `${data.runtime.events.network_summary.security.coop_responses}/` +
+                      `${data.runtime.events.network_summary.security.coep_responses}/` +
+                      `${data.runtime.events.network_summary.security.corp_responses} responses`,
+                  },
+                ]}
+              />
+              <TelemetryList
+                title="Cache behavior"
+                items={[
+                  {
+                    key: "no-store",
+                    primary: "no-store",
+                    secondary: `${data.runtime.events.network_summary.cache.no_store_responses} responses`,
+                  },
+                  {
+                    key: "no-cache",
+                    primary: "no-cache",
+                    secondary: `${data.runtime.events.network_summary.cache.no_cache_responses} responses`,
+                  },
+                  {
+                    key: "public",
+                    primary: "public cacheable",
+                    secondary: `${data.runtime.events.network_summary.cache.public_cacheable_responses} responses`,
+                  },
+                  {
+                    key: "private",
+                    primary: "private cacheable",
+                    secondary: `${data.runtime.events.network_summary.cache.private_cacheable_responses} responses`,
+                  },
+                  {
+                    key: "max-age",
+                    primary: "max-age",
+                    secondary: `${data.runtime.events.network_summary.cache.max_age_responses} responses`,
+                  },
+                  {
+                    key: "validators",
+                    primary: "validators and freshness",
+                    secondary:
+                      `Last-Modified ${data.runtime.events.network_summary.cache.last_modified_responses}` +
+                      ` • Vary ${data.runtime.events.network_summary.cache.vary_responses}` +
+                      ` • Age ${data.runtime.events.network_summary.cache.age_responses}`,
+                  },
+                ]}
               />
               <TelemetryList
                 title="Recent runtime logs"

@@ -81,6 +81,38 @@ export interface TelemetryResponse {
         transferred_bytes: number;
         avg_duration_ms?: number | null;
         max_duration_ms?: number | null;
+        cache: {
+          cache_control_present: number;
+          no_store_responses: number;
+          no_cache_responses: number;
+          public_cacheable_responses: number;
+          private_cacheable_responses: number;
+          max_age_responses: number;
+          etag_responses: number;
+          last_modified_responses: number;
+          vary_responses: number;
+          age_responses: number;
+          content_encoding_breakdown: Array<{
+            key: string;
+            count: number;
+          }>;
+        };
+        security: {
+          https_requests: number;
+          http_requests: number;
+          other_scheme_requests: number;
+          mixed_content_requests: number;
+          hsts_responses: number;
+          csp_responses: number;
+          x_frame_options_responses: number;
+          x_content_type_options_responses: number;
+          referrer_policy_responses: number;
+          permissions_policy_responses: number;
+          coop_responses: number;
+          coep_responses: number;
+          corp_responses: number;
+          insecure_main_frame_requests: number;
+        };
         method_breakdown: Array<{
           key: string;
           count: number;
