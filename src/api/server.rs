@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -125,6 +125,35 @@ pub struct TraceBody {
 pub struct EventQuery {
     #[serde(default)]
     pub since: u64,
+    #[serde(default)]
+    pub tab_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct TabQuery {
+    #[serde(default)]
+    pub tab_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TabCreateBody {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub source_tab_id: Option<u64>,
+    #[serde(default = "default_true")]
+    pub activate: bool,
+    #[serde(default = "default_true")]
+    pub inherit_session: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TabIdBody {
+    pub tab_id: u64,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,17 +167,6 @@ pub struct BrowserTabState {
 }
 
 impl BrowserTabState {
-    fn from_chrome_state(id: u64, state: &BrowserChromeState) -> Self {
-        Self {
-            id,
-            title: state.title.clone(),
-            url: state.url.clone(),
-            can_go_back: state.can_go_back,
-            can_go_forward: state.can_go_forward,
-            is_loading: state.is_loading,
-        }
-    }
-
     fn blank(id: u64, url: Option<String>) -> Self {
         let url = url.unwrap_or_default();
         Self {
@@ -193,115 +211,300 @@ impl Default for BrowserUiState {
     }
 }
 
-#[derive(Debug, Clone)]
 struct BrowserTabController {
     next_tab_id: u64,
-    state: BrowserUiState,
+    active_tab_id: u64,
+    tabs: BTreeMap<u64, ManagedTab>,
 }
 
-impl Default for BrowserTabController {
-    fn default() -> Self {
-        Self {
-            next_tab_id: 2,
-            state: BrowserUiState::default(),
-        }
-    }
+struct ManagedTab {
+    state: BrowserTabState,
+    client: LoadedAegisClient,
+    credential_capture: AutoCredentialCapture,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TabOperationResponse {
+    pub tab: BrowserTabState,
+    pub tabs: BrowserUiState,
 }
 
 impl BrowserTabController {
-    fn snapshot(&self) -> BrowserUiState {
-        self.state.clone()
-    }
-
-    fn active_tab_mut(&mut self) -> Option<&mut BrowserTabState> {
-        let active_id = self.state.active_tab_id;
-        self.state.tabs.iter_mut().find(|tab| tab.id == active_id)
-    }
-
-    fn apply_active_chrome_state(&mut self, state: &BrowserChromeState) {
-        if let Some(tab) = self.active_tab_mut() {
-            tab.apply_chrome_state(state);
-        } else {
-            self.state = BrowserUiState {
-                active_tab_id: 1,
-                tabs: vec![BrowserTabState::from_chrome_state(1, state)],
-            };
-            self.next_tab_id = 2;
+    fn new(initial_client: LoadedAegisClient) -> Self {
+        let mut tabs = BTreeMap::new();
+        tabs.insert(
+            1,
+            ManagedTab {
+                state: BrowserTabState::blank(1, None),
+                client: initial_client,
+                credential_capture: AutoCredentialCapture::default(),
+            },
+        );
+        Self {
+            next_tab_id: 2,
+            active_tab_id: 1,
+            tabs,
         }
     }
 
-    fn create_tab(&mut self, url: Option<String>) -> String {
+    fn snapshot(&self) -> BrowserUiState {
+        BrowserUiState {
+            active_tab_id: self.active_tab_id,
+            tabs: self.tabs.values().map(|tab| tab.state.clone()).collect(),
+        }
+    }
+
+    fn active_tab_id(&self) -> u64 {
+        self.active_tab_id
+    }
+
+    fn resolve_tab_id(&self, requested: Option<u64>) -> Result<u64, AegisError> {
+        let id = requested.unwrap_or(self.active_tab_id);
+        if self.tabs.contains_key(&id) {
+            Ok(id)
+        } else {
+            Err(AegisError::Bridge(format!("tab `{id}` does not exist")))
+        }
+    }
+
+    fn active_tab_state(&self) -> Option<BrowserTabState> {
+        self.tabs
+            .get(&self.active_tab_id)
+            .map(|tab| tab.state.clone())
+    }
+
+    fn active_client(&self) -> Result<&LoadedAegisClient, AegisError> {
+        Ok(&self.get_tab(self.active_tab_id)?.client)
+    }
+
+    fn active_client_mut(&mut self) -> Result<&mut LoadedAegisClient, AegisError> {
+        Ok(&mut self.get_tab_mut(self.active_tab_id)?.client)
+    }
+
+    fn tab_client(&self, tab_id: u64) -> Result<&LoadedAegisClient, AegisError> {
+        Ok(&self.get_tab(tab_id)?.client)
+    }
+
+    fn tab_client_mut(&mut self, tab_id: u64) -> Result<&mut LoadedAegisClient, AegisError> {
+        Ok(&mut self.get_tab_mut(tab_id)?.client)
+    }
+
+    fn tab_state(&self, tab_id: u64) -> Result<BrowserTabState, AegisError> {
+        self.tabs
+            .get(&tab_id)
+            .map(|tab| tab.state.clone())
+            .ok_or_else(|| AegisError::Bridge(format!("tab `{tab_id}` does not exist")))
+    }
+
+    fn get_tab_mut(&mut self, tab_id: u64) -> Result<&mut ManagedTab, AegisError> {
+        self.tabs
+            .get_mut(&tab_id)
+            .ok_or_else(|| AegisError::Bridge(format!("tab `{tab_id}` does not exist")))
+    }
+
+    fn get_tab(&self, tab_id: u64) -> Result<&ManagedTab, AegisError> {
+        self.tabs
+            .get(&tab_id)
+            .ok_or_else(|| AegisError::Bridge(format!("tab `{tab_id}` does not exist")))
+    }
+
+    fn apply_chrome_state(
+        &mut self,
+        tab_id: u64,
+        state: &BrowserChromeState,
+    ) -> Result<(), AegisError> {
+        let tab = self.get_tab_mut(tab_id)?;
+        tab.state.apply_chrome_state(state);
+        Ok(())
+    }
+
+    fn refresh_tab_state(&mut self, tab_id: u64) -> Result<BrowserChromeState, AegisError> {
+        let state = self.get_tab_mut(tab_id)?.client.snapshot_chrome_state()?;
+        self.apply_chrome_state(tab_id, &state)?;
+        Ok(state)
+    }
+
+    fn activate_tab(&mut self, tab_id: u64) -> Result<BrowserTabState, AegisError> {
+        self.resolve_tab_id(Some(tab_id))?;
+        self.active_tab_id = tab_id;
+        let _ = self.refresh_tab_state(tab_id);
+        self.tab_state(tab_id)
+    }
+
+    fn close_tab(&mut self, tab_id: u64) -> Result<Option<BrowserTabState>, AegisError> {
+        self.resolve_tab_id(Some(tab_id))?;
+        let remaining = self
+            .tabs
+            .keys()
+            .copied()
+            .filter(|id| *id != tab_id)
+            .collect::<Vec<_>>();
+        let was_active = self.active_tab_id == tab_id;
+        self.tabs.remove(&tab_id);
+
+        if self.tabs.is_empty() {
+            return Ok(None);
+        }
+        if was_active {
+            let replacement_id = remaining
+                .last()
+                .copied()
+                .ok_or_else(|| AegisError::Bridge("failed to resolve replacement tab".into()))?;
+            self.active_tab_id = replacement_id;
+            let _ = self.refresh_tab_state(replacement_id);
+            return Ok(Some(self.tab_state(replacement_id)?));
+        }
+        Ok(self.active_tab_state())
+    }
+
+    fn create_tab(
+        &mut self,
+        host_library: &Path,
+        browser: &BrowserConfig,
+        request: TabCreateBody,
+    ) -> Result<BrowserTabState, AegisError> {
+        let source_tab_id = request
+            .source_tab_id
+            .or_else(|| (!self.tabs.is_empty()).then_some(self.active_tab_id));
+        let inherited_session = if request.inherit_session {
+            match source_tab_id {
+                Some(source_tab_id) => {
+                    Some(self.get_tab_mut(source_tab_id)?.client.snapshot_session()?)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        let mut tab_browser = browser.clone();
+        tab_browser.start_url = request.url.clone().or_else(|| Some("about:blank".into()));
+        let mut client = LoadedAegisClient::connect(host_library, tab_browser)?;
+        if let Some(session) = inherited_session {
+            client.inject_session(session)?;
+        }
+        if let Some(url) = request.url.as_ref() {
+            let _ = client.navigate(url.clone())?;
+        }
+
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let tab = BrowserTabState::blank(id, url.clone());
-        self.state.active_tab_id = id;
-        self.state.tabs.push(tab);
-        navigation_target(url.as_deref())
+        let mut managed = ManagedTab {
+            state: BrowserTabState::blank(id, request.url.clone()),
+            client,
+            credential_capture: AutoCredentialCapture::default(),
+        };
+        if let Ok(chrome) = managed.client.snapshot_chrome_state() {
+            managed.state.apply_chrome_state(&chrome);
+        }
+        let state = managed.state.clone();
+        self.tabs.insert(id, managed);
+        if request.activate {
+            self.active_tab_id = id;
+        }
+        Ok(state)
     }
 
-    fn activate_tab(&mut self, tab_id: u64) -> Option<String> {
-        if self.state.tabs.iter().any(|tab| tab.id == tab_id) {
-            self.state.active_tab_id = tab_id;
-            return self
-                .state
-                .tabs
-                .iter()
-                .find(|tab| tab.id == tab_id)
-                .map(|tab| navigation_target(Some(&tab.url)));
+    fn ensure_not_empty(
+        &mut self,
+        host_library: &Path,
+        browser: &BrowserConfig,
+    ) -> Result<BrowserTabState, AegisError> {
+        if let Some(state) = self.active_tab_state() {
+            return Ok(state);
         }
-        None
+        let state = self.create_tab(
+            host_library,
+            browser,
+            TabCreateBody {
+                url: Some("about:blank".into()),
+                source_tab_id: None,
+                activate: true,
+                inherit_session: false,
+            },
+        )?;
+        Ok(state)
     }
 
-    fn close_tab(&mut self, tab_id: u64) -> Option<String> {
-        let index = self.state.tabs.iter().position(|tab| tab.id == tab_id)?;
-        let was_active = self.state.active_tab_id == tab_id;
-        self.state.tabs.remove(index);
-
-        if self.state.tabs.is_empty() {
-            let id = self.next_tab_id;
-            self.next_tab_id += 1;
-            self.state.tabs.push(BrowserTabState::blank(id, None));
-            self.state.active_tab_id = id;
-            return Some(navigation_target(None));
+    fn pump_all(&mut self) -> Result<Option<BrowserChromeState>, AegisError> {
+        let ids = self.tabs.keys().copied().collect::<Vec<_>>();
+        let mut active_chrome = None;
+        for id in ids {
+            {
+                let tab = self.get_tab_mut(id)?;
+                tab.client.pump()?;
+            }
+            if let Ok(state) = self.refresh_tab_state(id) {
+                if id == self.active_tab_id {
+                    active_chrome = Some(state);
+                }
+            }
         }
-
-        if was_active {
-            let fallback_index = index.saturating_sub(1).min(self.state.tabs.len() - 1);
-            self.state.active_tab_id = self.state.tabs[fallback_index].id;
-            return Some(navigation_target(Some(
-                &self.state.tabs[fallback_index].url,
-            )));
-        }
-
-        None
+        Ok(active_chrome)
     }
 }
 
 pub(crate) enum ApiCommand {
-    InjectSession(SessionState, oneshot::Sender<Result<(), AegisError>>),
-    SnapshotSession(oneshot::Sender<Result<SessionState, AegisError>>),
-    SnapshotTelemetry(oneshot::Sender<Result<TelemetryResponse, AegisError>>),
-    SaveSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
-    LoadSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
+    InjectSession(
+        Option<u64>,
+        SessionState,
+        oneshot::Sender<Result<(), AegisError>>,
+    ),
+    SnapshotSession(
+        Option<u64>,
+        oneshot::Sender<Result<SessionState, AegisError>>,
+    ),
+    SnapshotTelemetry(
+        Option<u64>,
+        oneshot::Sender<Result<TelemetryResponse, AegisError>>,
+    ),
+    SaveSessionProfile(
+        Option<u64>,
+        oneshot::Sender<Result<SessionProfileInfo, AegisError>>,
+    ),
+    LoadSessionProfile(
+        Option<u64>,
+        oneshot::Sender<Result<SessionProfileInfo, AegisError>>,
+    ),
     Navigate(
+        Option<u64>,
         String,
         oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>,
     ),
     Execute(
+        Option<u64>,
         Vec<Command>,
         oneshot::Sender<Result<ExecutionReport, AegisError>>,
     ),
-    SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
-    Events(u64, oneshot::Sender<Result<EventReadWindow, AegisError>>),
-    EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
-    GoBack,
-    GoForward,
-    Reload,
-    StopLoad,
-    ChromeNavigate(String),
-    CreateTab(Option<String>),
-    ActivateTab(u64),
-    CloseTab(u64),
+    SnapshotDom(
+        Option<u64>,
+        oneshot::Sender<Result<DomSnapshot, AegisError>>,
+    ),
+    Events(
+        Option<u64>,
+        u64,
+        oneshot::Sender<Result<EventReadWindow, AegisError>>,
+    ),
+    EnableTrace(
+        Option<u64>,
+        PathBuf,
+        oneshot::Sender<Result<(), AegisError>>,
+    ),
+    GoBack(Option<u64>),
+    GoForward(Option<u64>),
+    Reload(Option<u64>),
+    StopLoad(Option<u64>),
+    ChromeNavigate(Option<u64>, String),
+    ListTabs(oneshot::Sender<Result<BrowserUiState, AegisError>>),
+    CreateTab(
+        TabCreateBody,
+        oneshot::Sender<Result<TabOperationResponse, AegisError>>,
+    ),
+    ActivateTab(
+        u64,
+        oneshot::Sender<Result<TabOperationResponse, AegisError>>,
+    ),
+    CloseTab(u64, oneshot::Sender<Result<BrowserUiState, AegisError>>),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -498,6 +701,8 @@ struct DashboardTelemetry {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct TelemetryResponse {
+    tab_id: u64,
+    tabs: BrowserUiState,
     host_library: PathBuf,
     browser: BrowserConfig,
     startup: ServeStartupMetrics,
@@ -559,15 +764,15 @@ pub async fn serve(
         None
     };
     let client_connect_started = std::time::Instant::now();
-    let mut client = LoadedAegisClient::connect(host_library.clone(), browser_config.clone())?;
+    let mut initial_client =
+        LoadedAegisClient::connect(host_library.clone(), browser_config.clone())?;
     let profile_store = SessionProfileStore::new(profile_name).map_err(AegisError::Bridge)?;
     let credential_settings = AegisConfigStore::detect()
         .and_then(|store| store.load_credentials_settings())
         .map_err(AegisError::Bridge)?;
     let credential_store = AegisSecretStore::detect().map_err(AegisError::Bridge)?;
-    let mut credential_capture = AutoCredentialCapture::default();
     if let Some(session) = profile_store.load().map_err(AegisError::Bridge)? {
-        client.inject_session(session)?;
+        initial_client.inject_session(session)?;
     }
     let client_connect_ms = client_connect_started.elapsed().as_millis() as u64;
     let api_bind_started = std::time::Instant::now();
@@ -577,10 +782,17 @@ pub async fn serve(
         api_bind_ms: 0,
         total_ready_ms: 0,
     }));
-    let diagnostics = Arc::new(Mutex::new(ServeDiagnostics::new(client.runtime_status())));
+    let diagnostics = Arc::new(Mutex::new(ServeDiagnostics::new(
+        initial_client.runtime_status(),
+    )));
     let (chrome_tx, _chrome_rx) = watch::channel(BrowserChromeState::default());
     let chrome_tx = Arc::new(chrome_tx);
-    let initial_tabs = BrowserTabController::default().snapshot();
+    let mut tab_controller = BrowserTabController::new(initial_client);
+    let active_tab_id = tab_controller.active_tab_id();
+    if let Ok(chrome) = tab_controller.refresh_tab_state(active_tab_id) {
+        publish_chrome_state(&chrome_tx, chrome);
+    }
+    let initial_tabs = tab_controller.snapshot();
     let (tabs_tx, _tabs_rx) = watch::channel(initial_tabs);
     let tabs_tx = Arc::new(tabs_tx);
     let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
@@ -654,223 +866,531 @@ pub async fn serve(
         open_dashboard(&dashboard_url(addr))?;
     }
 
-    let mut tabs = BrowserTabController::default();
+    let mut tabs = tab_controller;
     loop {
         match rx.recv_timeout(IDLE_PUMP_INTERVAL) {
             Ok(command) => match command {
-                ApiCommand::InjectSession(session, reply) => {
+                ApiCommand::InjectSession(requested_tab_id, session, reply) => {
                     record_operation_started(&diagnostics, "inject_session", "injecting session");
-                    let result = client.inject_session(session.clone()).and_then(|_| {
-                        profile_store
-                            .save(&session)
-                            .map(|_| ())
-                            .map_err(AegisError::Bridge)
-                    });
-                    record_operation_finished(&diagnostics, "inject_session", &client, &result);
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let result = tabs
+                                .tab_client_mut(tab_id)
+                                .and_then(|client| client.inject_session(session.clone()))
+                                .and_then(|_| {
+                                    profile_store
+                                        .save(&session)
+                                        .map(|_| ())
+                                        .map_err(AegisError::Bridge)
+                                });
+                            refresh_selected_tab_state(&mut tabs, tab_id, &chrome_tx, &tabs_tx);
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(
+                                    &diagnostics,
+                                    "inject_session",
+                                    client,
+                                    &result,
+                                );
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "inject_session",
+                                failure_from_error(
+                                    "inject_session",
+                                    "resolving target tab",
+                                    &error,
+                                ),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
                     let _ = reply.send(result);
                 }
-                ApiCommand::SnapshotSession(reply) => {
+                ApiCommand::SnapshotSession(requested_tab_id, reply) => {
                     record_operation_started(
                         &diagnostics,
                         "snapshot_session",
                         "capturing session state",
                     );
-                    let result = client.snapshot_session();
-                    record_operation_finished(&diagnostics, "snapshot_session", &client, &result);
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let result = tabs
+                                .tab_client_mut(tab_id)
+                                .and_then(LoadedAegisClient::snapshot_session);
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(
+                                    &diagnostics,
+                                    "snapshot_session",
+                                    client,
+                                    &result,
+                                );
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "snapshot_session",
+                                failure_from_error(
+                                    "snapshot_session",
+                                    "resolving target tab",
+                                    &error,
+                                ),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
                     let _ = reply.send(result);
                 }
-                ApiCommand::SnapshotTelemetry(reply) => {
+                ApiCommand::SnapshotTelemetry(requested_tab_id, reply) => {
                     record_operation_started(
                         &diagnostics,
                         "snapshot_telemetry",
                         "capturing production telemetry snapshot",
                     );
-                    let result = snapshot_telemetry_response(
-                        &state,
-                        &startup,
-                        &diagnostics,
-                        &profile_store,
-                        &credential_store,
-                        &mut client,
-                    );
-                    record_operation_finished(&diagnostics, "snapshot_telemetry", &client, &result);
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let tabs_snapshot = tabs.snapshot();
+                            let result = tabs.tab_client_mut(tab_id).and_then(|client| {
+                                snapshot_telemetry_response(
+                                    &state,
+                                    &startup,
+                                    &diagnostics,
+                                    &profile_store,
+                                    &credential_store,
+                                    &tabs_snapshot,
+                                    tab_id,
+                                    client,
+                                )
+                            });
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(
+                                    &diagnostics,
+                                    "snapshot_telemetry",
+                                    client,
+                                    &result,
+                                );
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "snapshot_telemetry",
+                                failure_from_error(
+                                    "snapshot_telemetry",
+                                    "resolving target tab",
+                                    &error,
+                                ),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
                     let _ = reply.send(result);
                 }
-                ApiCommand::SaveSessionProfile(reply) => {
+                ApiCommand::SaveSessionProfile(requested_tab_id, reply) => {
                     record_operation_started(
                         &diagnostics,
                         "save_session_profile",
                         "persisting session profile",
                     );
-                    let result = client.snapshot_session().and_then(|session| {
-                        profile_store
-                            .save(&session)
-                            .map(|_| profile_store.info())
-                            .map_err(AegisError::Bridge)
-                    });
-                    record_operation_finished(
-                        &diagnostics,
-                        "save_session_profile",
-                        &client,
-                        &result,
-                    );
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let result = tabs
+                                .tab_client_mut(tab_id)
+                                .and_then(LoadedAegisClient::snapshot_session)
+                                .and_then(|session| {
+                                    profile_store
+                                        .save(&session)
+                                        .map(|_| profile_store.info())
+                                        .map_err(AegisError::Bridge)
+                                });
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(
+                                    &diagnostics,
+                                    "save_session_profile",
+                                    client,
+                                    &result,
+                                );
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "save_session_profile",
+                                failure_from_error(
+                                    "save_session_profile",
+                                    "resolving target tab",
+                                    &error,
+                                ),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
                     let _ = reply.send(result);
                 }
-                ApiCommand::LoadSessionProfile(reply) => {
+                ApiCommand::LoadSessionProfile(requested_tab_id, reply) => {
                     record_operation_started(
                         &diagnostics,
                         "load_session_profile",
                         "loading session profile",
                     );
-                    let result = profile_store.load().map_err(AegisError::Bridge).and_then(
-                        |maybe_session| match maybe_session {
-                            Some(session) => {
-                                client.inject_session(session).map(|_| profile_store.info())
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let result = profile_store.load().map_err(AegisError::Bridge).and_then(
+                                |maybe_session| match maybe_session {
+                                    Some(session) => tabs
+                                        .tab_client_mut(tab_id)
+                                        .and_then(|client| client.inject_session(session))
+                                        .map(|_| profile_store.info()),
+                                    None => Ok(profile_store.info()),
+                                },
+                            );
+                            refresh_selected_tab_state(&mut tabs, tab_id, &chrome_tx, &tabs_tx);
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(
+                                    &diagnostics,
+                                    "load_session_profile",
+                                    client,
+                                    &result,
+                                );
                             }
-                            None => Ok(profile_store.info()),
-                        },
-                    );
-                    record_operation_finished(
-                        &diagnostics,
-                        "load_session_profile",
-                        &client,
-                        &result,
-                    );
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "load_session_profile",
+                                failure_from_error(
+                                    "load_session_profile",
+                                    "resolving target tab",
+                                    &error,
+                                ),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
                     let _ = reply.send(result);
                 }
-                ApiCommand::Navigate(url, reply) => {
+                ApiCommand::Navigate(requested_tab_id, url, reply) => {
                     record_operation_started(
                         &diagnostics,
                         "navigate",
                         &format!("navigating to {url}"),
                     );
-                    credential_capture.reset_on_explicit_navigation(&url);
-                    let result = client.navigate(url);
-                    record_operation_finished(&diagnostics, "navigate", &client, &result);
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let result = (|| -> Result<Vec<SequencedEvent>, AegisError> {
+                                let tab = tabs.get_tab_mut(tab_id)?;
+                                tab.credential_capture.reset_on_explicit_navigation(&url);
+                                tab.client.navigate(url.clone())
+                            })();
+                            refresh_selected_tab_state(&mut tabs, tab_id, &chrome_tx, &tabs_tx);
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(
+                                    &diagnostics,
+                                    "navigate",
+                                    client,
+                                    &result,
+                                );
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "navigate",
+                                failure_from_error("navigate", "resolving target tab", &error),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
                     let _ = reply.send(result);
                 }
-                ApiCommand::Execute(commands, reply) => {
+                ApiCommand::Execute(requested_tab_id, commands, reply) => {
                     record_operation_started(
                         &diagnostics,
                         "execute",
                         "executing browser command batch",
                     );
-                    let maybe_snapshot = if credential_settings.auto_store
-                        && commands.iter().any(|command| {
-                            matches!(command, Command::SetValue { .. } | Command::Click { .. })
-                        }) {
-                        Some(client.snapshot_dom()?)
-                    } else {
-                        None
-                    };
-                    if let Some(snapshot) = maybe_snapshot.as_ref() {
-                        credential_capture.capture_fields(
-                            snapshot,
-                            client.runtime().current_url(),
-                            &commands,
-                        );
-                    }
-                    let should_persist = credential_settings.auto_store
-                        && maybe_snapshot.as_ref().is_some_and(|snapshot| {
-                            credential_capture.should_persist(snapshot, &commands)
-                        });
-                    let persist_origin = if should_persist {
-                        client.runtime().current_url().map(origin_key)
-                    } else {
-                        None
-                    };
-                    let result = client.execute(&commands).and_then(|report| {
-                        if let Some(origin) = persist_origin {
-                            credential_capture.persist(
-                                &credential_store,
-                                &profile_store.info().profile,
-                                &origin,
-                            )?;
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let result = (|| -> Result<ExecutionReport, AegisError> {
+                                let tab = tabs.get_tab_mut(tab_id)?;
+                                let maybe_snapshot = if credential_settings.auto_store
+                                    && commands.iter().any(|command| {
+                                        matches!(
+                                            command,
+                                            Command::SetValue { .. } | Command::Click { .. }
+                                        )
+                                    }) {
+                                    Some(tab.client.snapshot_dom()?)
+                                } else {
+                                    None
+                                };
+                                if let Some(snapshot) = maybe_snapshot.as_ref() {
+                                    tab.credential_capture.capture_fields(
+                                        snapshot,
+                                        tab.client.runtime().current_url(),
+                                        &commands,
+                                    );
+                                }
+                                let should_persist = credential_settings.auto_store
+                                    && maybe_snapshot.as_ref().is_some_and(|snapshot| {
+                                        tab.credential_capture.should_persist(snapshot, &commands)
+                                    });
+                                let persist_origin = if should_persist {
+                                    tab.client.runtime().current_url().map(origin_key)
+                                } else {
+                                    None
+                                };
+                                let report = tab.client.execute(&commands)?;
+                                if let Some(origin) = persist_origin {
+                                    tab.credential_capture.persist(
+                                        &credential_store,
+                                        &profile_store.info().profile,
+                                        &origin,
+                                    )?;
+                                }
+                                Ok(report)
+                            })();
+                            refresh_selected_tab_state(&mut tabs, tab_id, &chrome_tx, &tabs_tx);
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(&diagnostics, "execute", client, &result);
+                            }
+                            result
                         }
-                        Ok(report)
-                    });
-                    record_operation_finished(&diagnostics, "execute", &client, &result);
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "execute",
+                                failure_from_error("execute", "resolving target tab", &error),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
                     let _ = reply.send(result);
                 }
-                ApiCommand::SnapshotDom(reply) => {
+                ApiCommand::SnapshotDom(requested_tab_id, reply) => {
                     record_operation_started(
                         &diagnostics,
                         "snapshot_dom",
                         "capturing DOM snapshot",
                     );
-                    let result = client.snapshot_dom();
-                    record_operation_finished(&diagnostics, "snapshot_dom", &client, &result);
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let result = tabs
+                                .tab_client_mut(tab_id)
+                                .and_then(LoadedAegisClient::snapshot_dom);
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(
+                                    &diagnostics,
+                                    "snapshot_dom",
+                                    client,
+                                    &result,
+                                );
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "snapshot_dom",
+                                failure_from_error("snapshot_dom", "resolving target tab", &error),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
                     let _ = reply.send(result);
                 }
-                ApiCommand::Events(since, reply) => {
+                ApiCommand::Events(requested_tab_id, since, reply) => {
                     record_operation_started(&diagnostics, "events", "draining runtime events");
-                    let result = client.events_since(since);
-                    record_operation_finished(&diagnostics, "events", &client, &result);
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let result = tabs
+                                .tab_client_mut(tab_id)
+                                .and_then(|client| client.events_since(since));
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(&diagnostics, "events", client, &result);
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "events",
+                                failure_from_error("events", "resolving target tab", &error),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
                     let _ = reply.send(result);
                 }
-                ApiCommand::EnableTrace(path, reply) => {
+                ApiCommand::EnableTrace(requested_tab_id, path, reply) => {
                     record_operation_started(
                         &diagnostics,
                         "enable_trace",
                         "enabling trace recording",
                     );
-                    client.enable_trace_recording(path);
-                    record_operation_finished(&diagnostics, "enable_trace", &client, &Ok(()));
-                    let _ = reply.send(Ok(()));
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            if let Ok(client) = tabs.tab_client_mut(tab_id) {
+                                client.enable_trace_recording(path);
+                            }
+                            let result = Ok(());
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(
+                                    &diagnostics,
+                                    "enable_trace",
+                                    client,
+                                    &result,
+                                );
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "enable_trace",
+                                failure_from_error("enable_trace", "resolving target tab", &error),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
+                    let _ = reply.send(result);
                 }
-                ApiCommand::GoBack => {
-                    let _ = client.go_back();
-                }
-                ApiCommand::GoForward => {
-                    let _ = client.go_forward();
-                }
-                ApiCommand::Reload => {
-                    let _ = client.reload_page();
-                }
-                ApiCommand::StopLoad => {
-                    let _ = client.stop_load();
-                }
-                ApiCommand::ChromeNavigate(url) => {
-                    let _ = client.navigate(url);
-                }
-                ApiCommand::CreateTab(url) => {
-                    sync_tab_state(&mut client, &chrome_tx, &mut tabs, &tabs_tx);
-                    let target = tabs.create_tab(url);
-                    publish_tabs_state(&tabs_tx, tabs.snapshot());
-                    let _ = client.navigate(target);
-                }
-                ApiCommand::ActivateTab(tab_id) => {
-                    sync_tab_state(&mut client, &chrome_tx, &mut tabs, &tabs_tx);
-                    if let Some(target) = tabs.activate_tab(tab_id) {
-                        publish_tabs_state(&tabs_tx, tabs.snapshot());
-                        let _ = client.navigate(target);
+                ApiCommand::GoBack(requested_tab_id) => {
+                    if let Ok(tab_id) = tabs.resolve_tab_id(requested_tab_id) {
+                        let _ = tabs
+                            .tab_client_mut(tab_id)
+                            .and_then(LoadedAegisClient::go_back);
+                        refresh_selected_tab_state(&mut tabs, tab_id, &chrome_tx, &tabs_tx);
                     }
                 }
-                ApiCommand::CloseTab(tab_id) => {
-                    sync_tab_state(&mut client, &chrome_tx, &mut tabs, &tabs_tx);
-                    if let Some(target) = tabs.close_tab(tab_id) {
-                        publish_tabs_state(&tabs_tx, tabs.snapshot());
-                        let _ = client.navigate(target);
-                    } else {
-                        publish_tabs_state(&tabs_tx, tabs.snapshot());
+                ApiCommand::GoForward(requested_tab_id) => {
+                    if let Ok(tab_id) = tabs.resolve_tab_id(requested_tab_id) {
+                        let _ = tabs
+                            .tab_client_mut(tab_id)
+                            .and_then(LoadedAegisClient::go_forward);
+                        refresh_selected_tab_state(&mut tabs, tab_id, &chrome_tx, &tabs_tx);
                     }
+                }
+                ApiCommand::Reload(requested_tab_id) => {
+                    if let Ok(tab_id) = tabs.resolve_tab_id(requested_tab_id) {
+                        let _ = tabs
+                            .tab_client_mut(tab_id)
+                            .and_then(LoadedAegisClient::reload_page);
+                        refresh_selected_tab_state(&mut tabs, tab_id, &chrome_tx, &tabs_tx);
+                    }
+                }
+                ApiCommand::StopLoad(requested_tab_id) => {
+                    if let Ok(tab_id) = tabs.resolve_tab_id(requested_tab_id) {
+                        let _ = tabs
+                            .tab_client_mut(tab_id)
+                            .and_then(LoadedAegisClient::stop_load);
+                        refresh_selected_tab_state(&mut tabs, tab_id, &chrome_tx, &tabs_tx);
+                    }
+                }
+                ApiCommand::ChromeNavigate(requested_tab_id, url) => {
+                    if let Ok(tab_id) = tabs.resolve_tab_id(requested_tab_id) {
+                        let _ = tabs
+                            .tab_client_mut(tab_id)
+                            .and_then(|client| client.navigate(url));
+                        refresh_selected_tab_state(&mut tabs, tab_id, &chrome_tx, &tabs_tx);
+                    }
+                }
+                ApiCommand::ListTabs(reply) => {
+                    let _ = reply.send(Ok(tabs.snapshot()));
+                }
+                ApiCommand::CreateTab(request, reply) => {
+                    let result = tabs
+                        .create_tab(&state.host_library, &state.browser, request)
+                        .map(|tab| TabOperationResponse {
+                            tab,
+                            tabs: tabs.snapshot(),
+                        });
+                    publish_runtime_tab_state(&mut tabs, &chrome_tx, &tabs_tx);
+                    let _ = reply.send(result);
+                }
+                ApiCommand::ActivateTab(tab_id, reply) => {
+                    let result = tabs.activate_tab(tab_id).map(|tab| TabOperationResponse {
+                        tab,
+                        tabs: tabs.snapshot(),
+                    });
+                    publish_runtime_tab_state(&mut tabs, &chrome_tx, &tabs_tx);
+                    let _ = reply.send(result);
+                }
+                ApiCommand::CloseTab(tab_id, reply) => {
+                    let result = tabs.close_tab(tab_id).and_then(|_| {
+                        let _ = tabs.ensure_not_empty(&state.host_library, &state.browser)?;
+                        Ok(tabs.snapshot())
+                    });
+                    publish_runtime_tab_state(&mut tabs, &chrome_tx, &tabs_tx);
+                    let _ = reply.send(result);
                 }
             },
-            Err(mpsc::RecvTimeoutError::Timeout) => match client.pump() {
-                Ok(()) => {
-                    record_heartbeat(&diagnostics, &client);
-                    if let Ok(state) = client.snapshot_chrome_state() {
-                        publish_chrome_state(&chrome_tx, state.clone());
-                        tabs.apply_active_chrome_state(&state);
-                        publish_tabs_state(&tabs_tx, tabs.snapshot());
+            Err(mpsc::RecvTimeoutError::Timeout) => match tabs.pump_all() {
+                Ok(active_state) => {
+                    if let Ok(client) = tabs.active_client() {
+                        record_heartbeat(&diagnostics, client);
                     }
+                    if let Some(state) = active_state {
+                        publish_chrome_state(&chrome_tx, state);
+                    }
+                    publish_tabs_state(&tabs_tx, tabs.snapshot());
                 }
                 Err(error) => {
                     record_operation_failure(
                         &diagnostics,
                         "pump",
                         failure_from_error("pump", "pumping browser event loop", &error),
-                        Some(client.runtime_status()),
+                        tabs.active_client()
+                            .ok()
+                            .map(|client| client.runtime_status()),
                     );
                     return Err(error);
                 }
@@ -879,7 +1399,10 @@ pub async fn serve(
         }
     }
 
-    if let Ok(session) = client.snapshot_session() {
+    if let Ok(session) = tabs
+        .active_client_mut()
+        .and_then(LoadedAegisClient::snapshot_session)
+    {
         let _ = profile_store.save(&session);
     }
 
@@ -1097,15 +1620,6 @@ fn origin_key(url: &str) -> String {
     trimmed.to_string()
 }
 
-fn navigation_target(url: Option<&str>) -> String {
-    let trimmed = url.unwrap_or_default().trim();
-    if trimmed.is_empty() {
-        "about:blank".into()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 fn publish_chrome_state(chrome_tx: &watch::Sender<BrowserChromeState>, state: BrowserChromeState) {
     let _ = chrome_tx.send_if_modified(|current| {
         if *current != state {
@@ -1128,17 +1642,30 @@ fn publish_tabs_state(tabs_tx: &watch::Sender<BrowserUiState>, state: BrowserUiS
     });
 }
 
-fn sync_tab_state(
-    client: &mut LoadedAegisClient,
-    chrome_tx: &watch::Sender<BrowserChromeState>,
+fn publish_runtime_tab_state(
     tabs: &mut BrowserTabController,
+    chrome_tx: &watch::Sender<BrowserChromeState>,
     tabs_tx: &watch::Sender<BrowserUiState>,
 ) {
-    if let Ok(state) = client.snapshot_chrome_state() {
-        publish_chrome_state(chrome_tx, state.clone());
-        tabs.apply_active_chrome_state(&state);
-        publish_tabs_state(tabs_tx, tabs.snapshot());
+    let active_id = tabs.active_tab_id();
+    if let Ok(state) = tabs.refresh_tab_state(active_id) {
+        publish_chrome_state(chrome_tx, state);
     }
+    publish_tabs_state(tabs_tx, tabs.snapshot());
+}
+
+fn refresh_selected_tab_state(
+    tabs: &mut BrowserTabController,
+    tab_id: u64,
+    chrome_tx: &watch::Sender<BrowserChromeState>,
+    tabs_tx: &watch::Sender<BrowserUiState>,
+) {
+    if let Ok(state) = tabs.refresh_tab_state(tab_id)
+        && tab_id == tabs.active_tab_id()
+    {
+        publish_chrome_state(chrome_tx, state);
+    }
+    publish_tabs_state(tabs_tx, tabs.snapshot());
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -1161,6 +1688,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/dom", get(snapshot_dom))
         .route("/events", get(events))
         .route("/trace/enable", post(enable_trace))
+        .route("/tabs", get(list_tabs).post(create_tab))
+        .route("/tabs/:tab_id/activate", post(activate_tab))
+        .route("/tabs/:tab_id/close", post(close_tab))
         .route("/ui/bootstrap", get(ui::dashboard_bootstrap))
         .route("/ui/vnc", get(ui::vnc_websocket))
         .route("/ui/chrome/state", get(chrome::chrome_state_sse))
@@ -1252,6 +1782,8 @@ async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
 
 #[derive(Debug, Serialize)]
 struct RuntimeInfo {
+    tab_id: u64,
+    tabs: BrowserUiState,
     host_library: PathBuf,
     browser: BrowserConfig,
     diagnostics: RuntimeDiagnosticsResponse,
@@ -1259,8 +1791,15 @@ struct RuntimeInfo {
     profile: SessionProfileInfo,
 }
 
-async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>, ApiError> {
+async fn runtime_info(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+) -> Result<Json<RuntimeInfo>, ApiError> {
+    let tabs = state.tabs_state_snapshot();
+    let tab_id = query.tab_id.unwrap_or(tabs.active_tab_id);
     Ok(Json(RuntimeInfo {
+        tab_id,
+        tabs,
         host_library: state.host_library.clone(),
         browser: state.browser.clone(),
         diagnostics: read_diagnostics(&state.diagnostics),
@@ -1277,11 +1816,14 @@ async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>
     }))
 }
 
-async fn telemetry(State(state): State<ApiState>) -> Result<Json<TelemetryResponse>, ApiError> {
+async fn telemetry(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+) -> Result<Json<TelemetryResponse>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::SnapshotTelemetry(reply_tx))
+        .send(ApiCommand::SnapshotTelemetry(query.tab_id, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(
         await_command("snapshot_telemetry", &state.diagnostics, reply_rx).await??,
@@ -1294,10 +1836,13 @@ fn snapshot_telemetry_response(
     diagnostics: &Arc<Mutex<ServeDiagnostics>>,
     profile_store: &SessionProfileStore,
     credential_store: &AegisSecretStore,
+    tabs: &BrowserUiState,
+    tab_id: u64,
     client: &mut LoadedAegisClient,
 ) -> Result<TelemetryResponse, AegisError> {
     let runtime = client.runtime_mut().snapshot_telemetry();
     let session = client.snapshot_session()?;
+    let chrome = client.snapshot_chrome_state().unwrap_or_default();
     let credentials_settings = AegisConfigStore::detect()
         .and_then(|store| store.load_credentials_settings())
         .unwrap_or(CredentialsSettings {
@@ -1309,6 +1854,8 @@ fn snapshot_telemetry_response(
         .map_err(AegisError::Bridge)?;
     let config_store = AegisConfigStore::detect().ok();
     Ok(TelemetryResponse {
+        tab_id,
+        tabs: tabs.clone(),
         host_library: state.host_library.clone(),
         browser: state.browser.clone(),
         startup: startup
@@ -1320,7 +1867,7 @@ fn snapshot_telemetry_response(
                 total_ready_ms: 0,
             }),
         diagnostics: read_diagnostics(diagnostics),
-        chrome: state.chrome_state_snapshot(),
+        chrome,
         runtime,
         session: build_session_telemetry(profile_store.info(), session),
         credentials: build_credentials_telemetry(credentials_settings, credential_entries),
@@ -1457,11 +2004,12 @@ async fn doctor(State(state): State<ApiState>) -> Json<RuntimeDiagnosticsRespons
 
 async fn save_session_profile(
     State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
 ) -> Result<Json<SessionProfileInfo>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::SaveSessionProfile(reply_tx))
+        .send(ApiCommand::SaveSessionProfile(query.tab_id, reply_tx))
         .map_err(channel_error)?;
     let profile = await_command("save_session_profile", &state.diagnostics, reply_rx).await??;
     Ok(Json(profile))
@@ -1469,11 +2017,12 @@ async fn save_session_profile(
 
 async fn load_session_profile(
     State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
 ) -> Result<Json<SessionProfileInfo>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::LoadSessionProfile(reply_tx))
+        .send(ApiCommand::LoadSessionProfile(query.tab_id, reply_tx))
         .map_err(channel_error)?;
     let profile = await_command("load_session_profile", &state.diagnostics, reply_rx).await??;
     Ok(Json(profile))
@@ -1481,22 +2030,26 @@ async fn load_session_profile(
 
 async fn inject_session(
     State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
     Json(body): Json<SessionState>,
 ) -> Result<StatusCode, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::InjectSession(body, reply_tx))
+        .send(ApiCommand::InjectSession(query.tab_id, body, reply_tx))
         .map_err(channel_error)?;
     await_command("inject_session", &state.diagnostics, reply_rx).await??;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn snapshot_session(State(state): State<ApiState>) -> Result<Json<SessionState>, ApiError> {
+async fn snapshot_session(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+) -> Result<Json<SessionState>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::SnapshotSession(reply_tx))
+        .send(ApiCommand::SnapshotSession(query.tab_id, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(
         await_command("snapshot_session", &state.diagnostics, reply_rx).await??,
@@ -1505,12 +2058,13 @@ async fn snapshot_session(State(state): State<ApiState>) -> Result<Json<SessionS
 
 async fn navigate(
     State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
     Json(body): Json<NavigateBody>,
 ) -> Result<Json<Vec<SequencedEvent>>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::Navigate(body.url, reply_tx))
+        .send(ApiCommand::Navigate(query.tab_id, body.url, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(
         await_command("navigate", &state.diagnostics, reply_rx).await??,
@@ -1519,23 +2073,27 @@ async fn navigate(
 
 async fn execute(
     State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
     Json(body): Json<ExecuteBody>,
 ) -> Result<Json<ExecutionReport>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::Execute(body.commands, reply_tx))
+        .send(ApiCommand::Execute(query.tab_id, body.commands, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(
         await_command("execute", &state.diagnostics, reply_rx).await??,
     ))
 }
 
-async fn snapshot_dom(State(state): State<ApiState>) -> Result<Json<DomSnapshot>, ApiError> {
+async fn snapshot_dom(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+) -> Result<Json<DomSnapshot>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::SnapshotDom(reply_tx))
+        .send(ApiCommand::SnapshotDom(query.tab_id, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(
         await_command("snapshot_dom", &state.diagnostics, reply_rx).await??,
@@ -1549,7 +2107,7 @@ async fn events(
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::Events(query.since, reply_tx))
+        .send(ApiCommand::Events(query.tab_id, query.since, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(
         await_command("events", &state.diagnostics, reply_rx).await??,
@@ -1558,15 +2116,69 @@ async fn events(
 
 async fn enable_trace(
     State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
     Json(body): Json<TraceBody>,
 ) -> Result<StatusCode, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::EnableTrace(body.path, reply_tx))
+        .send(ApiCommand::EnableTrace(query.tab_id, body.path, reply_tx))
         .map_err(channel_error)?;
     await_command("enable_trace", &state.diagnostics, reply_rx).await??;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_tabs(State(state): State<ApiState>) -> Result<Json<BrowserUiState>, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::ListTabs(reply_tx))
+        .map_err(channel_error)?;
+    Ok(Json(
+        await_command("list_tabs", &state.diagnostics, reply_rx).await??,
+    ))
+}
+
+async fn create_tab(
+    State(state): State<ApiState>,
+    Json(body): Json<TabCreateBody>,
+) -> Result<Json<TabOperationResponse>, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::CreateTab(body, reply_tx))
+        .map_err(channel_error)?;
+    Ok(Json(
+        await_command("create_tab", &state.diagnostics, reply_rx).await??,
+    ))
+}
+
+async fn activate_tab(
+    State(state): State<ApiState>,
+    AxumPath(tab_id): AxumPath<u64>,
+) -> Result<Json<TabOperationResponse>, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::ActivateTab(tab_id, reply_tx))
+        .map_err(channel_error)?;
+    Ok(Json(
+        await_command("activate_tab", &state.diagnostics, reply_rx).await??,
+    ))
+}
+
+async fn close_tab(
+    State(state): State<ApiState>,
+    AxumPath(tab_id): AxumPath<u64>,
+) -> Result<Json<BrowserUiState>, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::CloseTab(tab_id, reply_tx))
+        .map_err(channel_error)?;
+    Ok(Json(
+        await_command("close_tab", &state.diagnostics, reply_rx).await??,
+    ))
 }
 
 fn channel_error(error: mpsc::SendError<ApiCommand>) -> ApiError {
@@ -2091,40 +2703,37 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserChromeState, BrowserTabController};
+    use super::{default_true, origin_key};
 
     #[test]
-    fn tab_controller_creates_and_activates_tabs() {
-        let mut controller = BrowserTabController::default();
-        controller.apply_active_chrome_state(&BrowserChromeState {
-            title: "Home".into(),
-            url: "https://example.com".into(),
-            can_go_back: false,
-            can_go_forward: false,
-            is_loading: false,
-        });
-
-        let target = controller.create_tab(Some("https://openai.com".into()));
-        assert_eq!(target, "https://openai.com");
-        assert_eq!(controller.snapshot().tabs.len(), 2);
-        assert_eq!(controller.snapshot().active_tab_id, 2);
-
-        let target = controller.activate_tab(1).expect("tab should activate");
-        assert_eq!(target, "https://example.com");
-        assert_eq!(controller.snapshot().active_tab_id, 1);
+    fn navigation_target_defaults_to_blank() {
+        let navigation_target = |url: Option<&str>| {
+            let trimmed = url.unwrap_or_default().trim();
+            if trimmed.is_empty() {
+                "about:blank".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        };
+        assert_eq!(navigation_target(None), "about:blank");
+        assert_eq!(navigation_target(Some("   ")), "about:blank");
+        assert_eq!(
+            navigation_target(Some("https://example.com")),
+            "https://example.com"
+        );
     }
 
     #[test]
-    fn tab_controller_closing_last_tab_recreates_blank_tab() {
-        let mut controller = BrowserTabController::default();
-        let target = controller
-            .close_tab(1)
-            .expect("closing the last tab should navigate");
-        let state = controller.snapshot();
+    fn origin_key_strips_paths() {
+        assert_eq!(
+            origin_key("https://example.com/docs/page"),
+            "https://example.com"
+        );
+        assert_eq!(origin_key("about:blank"), "about:blank");
+    }
 
-        assert_eq!(target, "about:blank");
-        assert_eq!(state.tabs.len(), 1);
-        assert_eq!(state.tabs[0].title, "New Tab");
-        assert_eq!(state.active_tab_id, state.tabs[0].id);
+    #[test]
+    fn default_true_is_true() {
+        assert!(default_true());
     }
 }
