@@ -3,8 +3,6 @@
 #include "include/aegis_platform.h"
 #include "include/base/cef_logging.h"
 #include "include/cef_browser.h"
-#include "include/wrapper/cef_library_loader.h"
-
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
@@ -15,11 +13,6 @@
 namespace {
 
 int RunAegisMain(int argc, char* argv[]) {
-  CefScopedLibraryLoader loader;
-  if (!loader.LoadInMain()) {
-    return 1;
-  }
-
   CefMainArgs main_args(argc, argv);
 
   std::string config_path;
