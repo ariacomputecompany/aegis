@@ -5,6 +5,7 @@ import {
   ADDR_RIGHT_INSET,
   TAB_LEFT_INSET,
 } from "../tokens";
+import type { BrowserTabState } from "../hooks/useChromeState";
 import { TabStrip } from "./TabStrip";
 import { NavigationButtons } from "./NavigationButtons";
 import { AddressBar } from "./AddressBar";
@@ -12,6 +13,8 @@ import { ProgressBar } from "./ProgressBar";
 import { Separator } from "./Separator";
 
 interface ToolbarProps {
+  tabs: BrowserTabState[];
+  activeTabId: number;
   title: string;
   url: string;
   canGoBack: boolean;
@@ -22,9 +25,14 @@ interface ToolbarProps {
   onReload: () => void;
   onStop: () => void;
   onNavigate: (url: string) => void;
+  onCreateTab: (url?: string) => void;
+  onActivateTab: (tabId: number) => void;
+  onCloseTab: (tabId: number) => void;
 }
 
 export function Toolbar({
+  tabs,
+  activeTabId,
   title,
   url,
   canGoBack,
@@ -35,6 +43,9 @@ export function Toolbar({
   onReload,
   onStop,
   onNavigate,
+  onCreateTab,
+  onActivateTab,
+  onCloseTab,
 }: ToolbarProps) {
   return (
     <div
@@ -59,7 +70,14 @@ export function Toolbar({
           height: TOOLBAR_HEIGHT / 2,
         }}
       >
-        <TabStrip title={title} />
+        <TabStrip
+          tabs={tabs}
+          activeTabId={activeTabId}
+          fallbackTitle={title}
+          onCreateTab={onCreateTab}
+          onActivateTab={onActivateTab}
+          onCloseTab={onCloseTab}
+        />
       </div>
 
       {/* Lower band: navigation + address bar */}

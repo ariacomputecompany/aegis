@@ -7,8 +7,10 @@ import { RemoteViewport } from "./RemoteViewport";
 import { TelemetryPanel } from "./TelemetryPanel";
 
 export function BrowserChrome() {
-  const state = useChromeState();
+  const chrome = useChromeState();
   const nav = useNavigation();
+  const activeTab =
+    chrome.tabs.find((tab) => tab.id === chrome.activeTabId) ?? chrome.tabs[0];
 
   return (
     <div
@@ -23,22 +25,27 @@ export function BrowserChrome() {
       }}
     >
       <Toolbar
-        title={state.title}
-        url={state.url}
-        canGoBack={state.canGoBack}
-        canGoForward={state.canGoForward}
-        isLoading={state.isLoading}
+        tabs={chrome.tabs}
+        activeTabId={chrome.activeTabId}
+        title={activeTab?.title ?? "Aegis"}
+        url={activeTab?.url ?? ""}
+        canGoBack={activeTab?.canGoBack ?? false}
+        canGoForward={activeTab?.canGoForward ?? false}
+        isLoading={activeTab?.isLoading ?? false}
         onBack={nav.goBack}
         onForward={nav.goForward}
         onReload={nav.reload}
         onStop={nav.stop}
         onNavigate={nav.navigate}
+        onCreateTab={nav.createTab}
+        onActivateTab={nav.activateTab}
+        onCloseTab={nav.closeTab}
       />
 
       <div className="browser-shell">
         <div style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: 0 }}>
           <RemoteViewport />
-          <PageTransition isLoading={state.isLoading} />
+          <PageTransition isLoading={activeTab?.isLoading ?? false} />
         </div>
         <TelemetryPanel />
       </div>

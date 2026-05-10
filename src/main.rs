@@ -317,14 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
-            server::serve(
-                addr,
-                host_lib,
-                browser_config,
-                cli.profile.clone(),
-                false,
-            )
-            .await?;
+            server::serve(addr, host_lib, browser_config, cli.profile.clone(), false).await?;
         }
         Commands::Open => {
             let addr = SocketAddr::from(([127, 0, 0, 1], 7878));

@@ -123,7 +123,9 @@ pub fn open_dashboard(url: &str) -> Result<(), AegisError> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| AegisError::Bridge(format!("failed to open dashboard browser: {error}")))?;
+            .map_err(|error| {
+                AegisError::Bridge(format!("failed to open dashboard browser: {error}"))
+            })?;
         return Ok(());
     }
     #[cfg(not(target_os = "linux"))]

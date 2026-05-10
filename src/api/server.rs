@@ -22,10 +22,12 @@ use crate::browser::BrowserConfig;
 use crate::commands::command::{Command, CommandTarget};
 use crate::commands::matcher::resolve_command_target as resolve_snapshot_target;
 use crate::config_store::{
-    AegisConfigStore, AegisSecretStore, CredentialInput, CredentialsSettings,
-    StoredCredentialEntry,
+    AegisConfigStore, AegisSecretStore, CredentialInput, CredentialsSettings, StoredCredentialEntry,
 };
-use crate::display::{DashboardBootstrap, LinuxDisplayStack, open_dashboard, set_display_env, spawn_linux_display_stack};
+use crate::display::{
+    DashboardBootstrap, LinuxDisplayStack, open_dashboard, set_display_env,
+    spawn_linux_display_stack,
+};
 use crate::dom::node::{DomNode, DomSnapshot};
 use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::host::LoadedAegisClient;
@@ -48,6 +50,7 @@ pub struct ApiState {
     profile: SessionProfileInfo,
     diagnostics: Arc<Mutex<ServeDiagnostics>>,
     chrome_tx: Arc<watch::Sender<BrowserChromeState>>,
+    tabs_tx: Arc<watch::Sender<BrowserUiState>>,
     dashboard_bootstrap: Option<DashboardBootstrap>,
     vnc_addr: Option<SocketAddr>,
 }
@@ -61,7 +64,18 @@ impl ApiState {
         self.chrome_tx.borrow().clone()
     }
 
-    pub(crate) fn send_command(&self, command: ApiCommand) -> Result<(), mpsc::SendError<ApiCommand>> {
+    pub fn tabs_rx(&self) -> watch::Receiver<BrowserUiState> {
+        self.tabs_tx.subscribe()
+    }
+
+    pub fn tabs_state_snapshot(&self) -> BrowserUiState {
+        self.tabs_tx.borrow().clone()
+    }
+
+    pub(crate) fn send_command(
+        &self,
+        command: ApiCommand,
+    ) -> Result<(), mpsc::SendError<ApiCommand>> {
         self.tx.send(command)
     }
 
@@ -113,6 +127,156 @@ pub struct EventQuery {
     pub since: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserTabState {
+    pub id: u64,
+    pub title: String,
+    pub url: String,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub is_loading: bool,
+}
+
+impl BrowserTabState {
+    fn from_chrome_state(id: u64, state: &BrowserChromeState) -> Self {
+        Self {
+            id,
+            title: state.title.clone(),
+            url: state.url.clone(),
+            can_go_back: state.can_go_back,
+            can_go_forward: state.can_go_forward,
+            is_loading: state.is_loading,
+        }
+    }
+
+    fn blank(id: u64, url: Option<String>) -> Self {
+        let url = url.unwrap_or_default();
+        Self {
+            id,
+            title: if url.is_empty() {
+                "New Tab".into()
+            } else {
+                url.clone()
+            },
+            url,
+            can_go_back: false,
+            can_go_forward: false,
+            is_loading: false,
+        }
+    }
+
+    fn apply_chrome_state(&mut self, state: &BrowserChromeState) {
+        self.title = if state.title.trim().is_empty() {
+            "New Tab".into()
+        } else {
+            state.title.clone()
+        };
+        self.url = state.url.clone();
+        self.can_go_back = state.can_go_back;
+        self.can_go_forward = state.can_go_forward;
+        self.is_loading = state.is_loading;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserUiState {
+    pub active_tab_id: u64,
+    pub tabs: Vec<BrowserTabState>,
+}
+
+impl Default for BrowserUiState {
+    fn default() -> Self {
+        Self {
+            active_tab_id: 1,
+            tabs: vec![BrowserTabState::blank(1, None)],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BrowserTabController {
+    next_tab_id: u64,
+    state: BrowserUiState,
+}
+
+impl Default for BrowserTabController {
+    fn default() -> Self {
+        Self {
+            next_tab_id: 2,
+            state: BrowserUiState::default(),
+        }
+    }
+}
+
+impl BrowserTabController {
+    fn snapshot(&self) -> BrowserUiState {
+        self.state.clone()
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut BrowserTabState> {
+        let active_id = self.state.active_tab_id;
+        self.state.tabs.iter_mut().find(|tab| tab.id == active_id)
+    }
+
+    fn apply_active_chrome_state(&mut self, state: &BrowserChromeState) {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.apply_chrome_state(state);
+        } else {
+            self.state = BrowserUiState {
+                active_tab_id: 1,
+                tabs: vec![BrowserTabState::from_chrome_state(1, state)],
+            };
+            self.next_tab_id = 2;
+        }
+    }
+
+    fn create_tab(&mut self, url: Option<String>) -> String {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let tab = BrowserTabState::blank(id, url.clone());
+        self.state.active_tab_id = id;
+        self.state.tabs.push(tab);
+        navigation_target(url.as_deref())
+    }
+
+    fn activate_tab(&mut self, tab_id: u64) -> Option<String> {
+        if self.state.tabs.iter().any(|tab| tab.id == tab_id) {
+            self.state.active_tab_id = tab_id;
+            return self
+                .state
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .map(|tab| navigation_target(Some(&tab.url)));
+        }
+        None
+    }
+
+    fn close_tab(&mut self, tab_id: u64) -> Option<String> {
+        let index = self.state.tabs.iter().position(|tab| tab.id == tab_id)?;
+        let was_active = self.state.active_tab_id == tab_id;
+        self.state.tabs.remove(index);
+
+        if self.state.tabs.is_empty() {
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.state.tabs.push(BrowserTabState::blank(id, None));
+            self.state.active_tab_id = id;
+            return Some(navigation_target(None));
+        }
+
+        if was_active {
+            let fallback_index = index.saturating_sub(1).min(self.state.tabs.len() - 1);
+            self.state.active_tab_id = self.state.tabs[fallback_index].id;
+            return Some(navigation_target(Some(
+                &self.state.tabs[fallback_index].url,
+            )));
+        }
+
+        None
+    }
+}
+
 pub(crate) enum ApiCommand {
     InjectSession(SessionState, oneshot::Sender<Result<(), AegisError>>),
     SnapshotSession(oneshot::Sender<Result<SessionState, AegisError>>),
@@ -135,6 +299,9 @@ pub(crate) enum ApiCommand {
     Reload,
     StopLoad,
     ChromeNavigate(String),
+    CreateTab(Option<String>),
+    ActivateTab(u64),
+    CloseTab(u64),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -413,6 +580,9 @@ pub async fn serve(
     let diagnostics = Arc::new(Mutex::new(ServeDiagnostics::new(client.runtime_status())));
     let (chrome_tx, _chrome_rx) = watch::channel(BrowserChromeState::default());
     let chrome_tx = Arc::new(chrome_tx);
+    let initial_tabs = BrowserTabController::default().snapshot();
+    let (tabs_tx, _tabs_rx) = watch::channel(initial_tabs);
+    let tabs_tx = Arc::new(tabs_tx);
     let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
     let state = ApiState {
         tx,
@@ -422,6 +592,7 @@ pub async fn serve(
         profile: profile_store.info(),
         diagnostics: diagnostics.clone(),
         chrome_tx: chrome_tx.clone(),
+        tabs_tx: tabs_tx.clone(),
         dashboard_bootstrap: display_stack.as_ref().map(LinuxDisplayStack::bootstrap),
         vnc_addr: display_stack.as_ref().map(LinuxDisplayStack::vnc_addr),
     };
@@ -483,6 +654,7 @@ pub async fn serve(
         open_dashboard(&dashboard_url(addr))?;
     }
 
+    let mut tabs = BrowserTabController::default();
     loop {
         match rx.recv_timeout(IDLE_PUMP_INTERVAL) {
             Ok(command) => match command {
@@ -661,19 +833,36 @@ pub async fn serve(
                 ApiCommand::ChromeNavigate(url) => {
                     let _ = client.navigate(url);
                 }
+                ApiCommand::CreateTab(url) => {
+                    sync_tab_state(&mut client, &chrome_tx, &mut tabs, &tabs_tx);
+                    let target = tabs.create_tab(url);
+                    publish_tabs_state(&tabs_tx, tabs.snapshot());
+                    let _ = client.navigate(target);
+                }
+                ApiCommand::ActivateTab(tab_id) => {
+                    sync_tab_state(&mut client, &chrome_tx, &mut tabs, &tabs_tx);
+                    if let Some(target) = tabs.activate_tab(tab_id) {
+                        publish_tabs_state(&tabs_tx, tabs.snapshot());
+                        let _ = client.navigate(target);
+                    }
+                }
+                ApiCommand::CloseTab(tab_id) => {
+                    sync_tab_state(&mut client, &chrome_tx, &mut tabs, &tabs_tx);
+                    if let Some(target) = tabs.close_tab(tab_id) {
+                        publish_tabs_state(&tabs_tx, tabs.snapshot());
+                        let _ = client.navigate(target);
+                    } else {
+                        publish_tabs_state(&tabs_tx, tabs.snapshot());
+                    }
+                }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => match client.pump() {
                 Ok(()) => {
                     record_heartbeat(&diagnostics, &client);
                     if let Ok(state) = client.snapshot_chrome_state() {
-                        let _ = chrome_tx.send_if_modified(|current| {
-                            if *current != state {
-                                *current = state;
-                                true
-                            } else {
-                                false
-                            }
-                        });
+                        publish_chrome_state(&chrome_tx, state.clone());
+                        tabs.apply_active_chrome_state(&state);
+                        publish_tabs_state(&tabs_tx, tabs.snapshot());
                     }
                 }
                 Err(error) => {
@@ -908,6 +1097,50 @@ fn origin_key(url: &str) -> String {
     trimmed.to_string()
 }
 
+fn navigation_target(url: Option<&str>) -> String {
+    let trimmed = url.unwrap_or_default().trim();
+    if trimmed.is_empty() {
+        "about:blank".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn publish_chrome_state(chrome_tx: &watch::Sender<BrowserChromeState>, state: BrowserChromeState) {
+    let _ = chrome_tx.send_if_modified(|current| {
+        if *current != state {
+            *current = state.clone();
+            true
+        } else {
+            false
+        }
+    });
+}
+
+fn publish_tabs_state(tabs_tx: &watch::Sender<BrowserUiState>, state: BrowserUiState) {
+    let _ = tabs_tx.send_if_modified(|current| {
+        if *current != state {
+            *current = state.clone();
+            true
+        } else {
+            false
+        }
+    });
+}
+
+fn sync_tab_state(
+    client: &mut LoadedAegisClient,
+    chrome_tx: &watch::Sender<BrowserChromeState>,
+    tabs: &mut BrowserTabController,
+    tabs_tx: &watch::Sender<BrowserUiState>,
+) {
+    if let Ok(state) = client.snapshot_chrome_state() {
+        publish_chrome_state(chrome_tx, state.clone());
+        tabs.apply_active_chrome_state(&state);
+        publish_tabs_state(tabs_tx, tabs.snapshot());
+    }
+}
+
 pub fn router(state: ApiState) -> Router {
     use super::chrome;
     use super::ui;
@@ -931,12 +1164,26 @@ pub fn router(state: ApiState) -> Router {
         .route("/ui/bootstrap", get(ui::dashboard_bootstrap))
         .route("/ui/vnc", get(ui::vnc_websocket))
         .route("/ui/chrome/state", get(chrome::chrome_state_sse))
-        .route("/ui/chrome/state/snapshot", get(chrome::chrome_state_snapshot))
+        .route(
+            "/ui/chrome/state/snapshot",
+            get(chrome::chrome_state_snapshot),
+        )
+        .route("/ui/chrome/tabs", get(chrome::chrome_tabs_sse))
+        .route(
+            "/ui/chrome/tabs/snapshot",
+            get(chrome::chrome_tabs_snapshot),
+        )
         .route("/ui/chrome/back", post(chrome::chrome_back))
         .route("/ui/chrome/forward", post(chrome::chrome_forward))
         .route("/ui/chrome/reload", post(chrome::chrome_reload))
         .route("/ui/chrome/stop", post(chrome::chrome_stop))
         .route("/ui/chrome/navigate", post(chrome::chrome_navigate))
+        .route("/ui/chrome/tabs/new", post(chrome::chrome_new_tab))
+        .route(
+            "/ui/chrome/tabs/activate",
+            post(chrome::chrome_activate_tab),
+        )
+        .route("/ui/chrome/tabs/close", post(chrome::chrome_close_tab))
         .layer(CorsLayer::permissive());
 
     if let Some(web_ui_dist) = state
@@ -969,7 +1216,9 @@ fn web_ui_dist_path() -> Option<PathBuf> {
             }
         }
     }
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("web-ui").join("dist");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("web-ui")
+        .join("dist");
     path.is_dir().then_some(path)
 }
 
@@ -1080,10 +1329,7 @@ fn snapshot_telemetry_response(
     })
 }
 
-fn build_session_telemetry(
-    profile: SessionProfileInfo,
-    session: SessionState,
-) -> SessionTelemetry {
+fn build_session_telemetry(profile: SessionProfileInfo, session: SessionState) -> SessionTelemetry {
     let cookies = session
         .cookies
         .iter()
@@ -1158,9 +1404,7 @@ fn build_credentials_telemetry(
     }
 }
 
-fn build_runtime_settings_telemetry(
-    store: Option<&AegisConfigStore>,
-) -> RuntimeSettingsTelemetry {
+fn build_runtime_settings_telemetry(store: Option<&AegisConfigStore>) -> RuntimeSettingsTelemetry {
     let agent = store.and_then(|store| store.get("agent").ok().flatten());
     let runtime = store.and_then(|store| store.get("runtime").ok().flatten());
     RuntimeSettingsTelemetry {
@@ -1644,7 +1888,10 @@ impl ServeDiagnostics {
         self.last_failure = Some(failure);
         if let Some(active) = self.active_operation.take() {
             let elapsed_ms = active.started_at.elapsed().as_millis() as u64;
-            let error_message = self.last_failure.as_ref().map(|failure| failure.message.clone());
+            let error_message = self
+                .last_failure
+                .as_ref()
+                .map(|failure| failure.message.clone());
             self.record_completed_operation(CompletedOperationSnapshot {
                 id: active.id,
                 name: active.name,
@@ -1691,7 +1938,10 @@ impl ServeDiagnostics {
                 finished_at_ms: now,
                 elapsed_ms,
                 timed_out: true,
-                error_message: self.last_failure.as_ref().map(|failure| failure.message.clone()),
+                error_message: self
+                    .last_failure
+                    .as_ref()
+                    .map(|failure| failure.message.clone()),
             });
             self.update_operation_aggregate(operation, false, true, elapsed_ms);
         }
@@ -1837,4 +2087,44 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BrowserChromeState, BrowserTabController};
+
+    #[test]
+    fn tab_controller_creates_and_activates_tabs() {
+        let mut controller = BrowserTabController::default();
+        controller.apply_active_chrome_state(&BrowserChromeState {
+            title: "Home".into(),
+            url: "https://example.com".into(),
+            can_go_back: false,
+            can_go_forward: false,
+            is_loading: false,
+        });
+
+        let target = controller.create_tab(Some("https://openai.com".into()));
+        assert_eq!(target, "https://openai.com");
+        assert_eq!(controller.snapshot().tabs.len(), 2);
+        assert_eq!(controller.snapshot().active_tab_id, 2);
+
+        let target = controller.activate_tab(1).expect("tab should activate");
+        assert_eq!(target, "https://example.com");
+        assert_eq!(controller.snapshot().active_tab_id, 1);
+    }
+
+    #[test]
+    fn tab_controller_closing_last_tab_recreates_blank_tab() {
+        let mut controller = BrowserTabController::default();
+        let target = controller
+            .close_tab(1)
+            .expect("closing the last tab should navigate");
+        let state = controller.snapshot();
+
+        assert_eq!(target, "about:blank");
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.tabs[0].title, "New Tab");
+        assert_eq!(state.active_tab_id, state.tabs[0].id);
+    }
 }

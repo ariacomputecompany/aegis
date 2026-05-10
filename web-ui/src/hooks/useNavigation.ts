@@ -22,8 +22,20 @@ export function useNavigation() {
   const stop = useCallback(() => fireAndForget("/ui/chrome/stop"), []);
   const navigate = useCallback(
     (url: string) => fireAndForget("/ui/chrome/navigate", { url }),
+      [],
+  );
+  const createTab = useCallback(
+    (url?: string) => fireAndForget("/ui/chrome/tabs/new", url ? { url } : {}),
+    [],
+  );
+  const activateTab = useCallback(
+    (tabId: number) => fireAndForget("/ui/chrome/tabs/activate", { tab_id: tabId }),
+    [],
+  );
+  const closeTab = useCallback(
+    (tabId: number) => fireAndForget("/ui/chrome/tabs/close", { tab_id: tabId }),
     [],
   );
 
-  return { goBack, goForward, reload, stop, navigate };
+  return { goBack, goForward, reload, stop, navigate, createTab, activateTab, closeTab };
 }

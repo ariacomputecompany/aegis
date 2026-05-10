@@ -5,9 +5,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#include <fstream>
 #include <stdexcept>
-#include <vector>
 
 namespace {
 
@@ -16,31 +14,6 @@ std::filesystem::path DetectInstallRoot(const std::filesystem::path& library_dir
     return library_dir.parent_path();
   }
   return library_dir;
-}
-
-std::vector<std::string> ReadProcessCommandLine() {
-  std::ifstream input("/proc/self/cmdline", std::ios::binary);
-  if (!input.is_open()) {
-    return {};
-  }
-
-  std::vector<std::string> argv;
-  std::string current;
-  char ch = '\0';
-  while (input.get(ch)) {
-    if (ch == '\0') {
-      if (!current.empty()) {
-        argv.push_back(current);
-        current.clear();
-      }
-      continue;
-    }
-    current.push_back(ch);
-  }
-  if (!current.empty()) {
-    argv.push_back(current);
-  }
-  return argv;
 }
 
 }  // namespace
@@ -109,34 +82,21 @@ bool AegisExecuteProcessAndInitialize(const CefMainArgs& main_args,
                                       CefRefPtr<CefApp> app,
                                       int* subprocess_exit_code,
                                       std::string* error) {
-  static_cast<void>(main_args);
   if (options.initialize_browser_host_application) {
     AegisInitializeBrowserHostApplication();
   }
 
-  auto argv_storage = ReadProcessCommandLine();
-  if (argv_storage.empty()) {
-    argv_storage.emplace_back("/proc/self/exe");
-  }
-  std::vector<char*> argv;
-  argv.reserve(argv_storage.size());
-  for (auto& arg : argv_storage) {
-    argv.push_back(arg.data());
-  }
-  CefMainArgs resolved_main_args(static_cast<int>(argv.size()), argv.data());
-
   CefSettings settings;
   AegisConfigureCefSettings(options, &settings);
 
-  const int execute_process_result =
-      CefExecuteProcess(resolved_main_args, app.get(), nullptr);
+  const int execute_process_result = CefExecuteProcess(main_args, app.get(), nullptr);
   if (subprocess_exit_code != nullptr) {
     *subprocess_exit_code = execute_process_result;
   }
   if (execute_process_result >= 0) {
     return false;
   }
-  if (!CefInitialize(resolved_main_args, settings, app.get(), nullptr)) {
+  if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
     if (error != nullptr) {
       *error = "CefInitialize failed";
     }
