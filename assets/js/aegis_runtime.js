@@ -1252,6 +1252,48 @@
     };
   }
 
+  function commandTargetValue(target) {
+    if (!target || typeof target !== "object") {
+      return target;
+    }
+    if (Object.prototype.hasOwnProperty.call(target, "match")) {
+      return target.match;
+    }
+    if (Object.prototype.hasOwnProperty.call(target, "id")) {
+      return target.id;
+    }
+    return target;
+  }
+
+  function resolveTargetInfo(target, action) {
+    const resolved = resolveTarget(commandTargetValue(target), action || null);
+    return {
+      target_id: resolved.targetId,
+      matched: resolved.matched,
+      debug: resolved.debug
+    };
+  }
+
+  function waitState(selector) {
+    let selectorFound = false;
+    if (selector) {
+      try {
+        selectorFound = !!document.querySelector(selector);
+      } catch (_error) {
+        selectorFound = false;
+      }
+    }
+    const animations = typeof document.getAnimations === "function"
+      ? document.getAnimations().some((animation) => animation.playState === "running")
+      : false;
+    return {
+      scroll_x: Number.isFinite(window.scrollX) ? window.scrollX : null,
+      scroll_y: Number.isFinite(window.scrollY) ? window.scrollY : null,
+      selector_found: selectorFound,
+      animations_running: animations
+    };
+  }
+
   function scrollIntoViewIfNeeded(el) {
     if (typeof el.scrollIntoView === "function") {
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
@@ -2122,22 +2164,28 @@
   }
 
   function exec(commands) {
-    return commands.map((command) => {
+    return commands.map((command, index) => {
+      const eventStart = queue.length;
       try {
+        let result;
         switch (command.type) {
           case "click":
-            return { ok: true, value: click(command.match || command.id) };
+            result = { ok: true, value: click(command.match || command.id) };
+            break;
           case "hover":
-            return { ok: true, value: hover(command.match || command.id) };
+            result = { ok: true, value: hover(command.match || command.id) };
+            break;
           case "set_value":
-            return { ok: true, value: setValue(command.match || command.id, command.value) };
+            result = { ok: true, value: setValue(command.match || command.id, command.value) };
+            break;
           case "set_files":
-            return {
+            result = {
               ok: true,
               value: setFiles(command.match || command.id, command.files || [])
             };
+            break;
           case "press_key":
-            return {
+            result = {
               ok: true,
               value: pressKey(
                 command.target ? (command.target.match || command.target.id) : null,
@@ -2151,10 +2199,12 @@
                 }
               )
             };
+            break;
           case "scroll":
-            return { ok: true, value: scrollToPosition(command.x, command.y) };
+            result = { ok: true, value: scrollToPosition(command.x, command.y) };
+            break;
           case "drag":
-            return {
+            result = {
               ok: true,
               value: drag(command.match || command.id, {
                 deltaX: command.delta_x,
@@ -2165,15 +2215,33 @@
                 handle: command.handle
               })
             };
+            break;
           case "geometry":
-            return { ok: true, value: geometry(command.match || command.id) };
+            result = { ok: true, value: geometry(command.match || command.id) };
+            break;
           case "eval":
-            return { ok: true, value: Function(command.code)() };
+            result = { ok: true, value: Function(command.code)() };
+            break;
           default:
-            return { ok: false, error: `unsupported command ${command.type}` };
+            result = { ok: false, error: `unsupported command ${command.type}` };
+            break;
         }
+        const eventEnd = queue.length;
+        if (result && result.value && typeof result.value === "object" && !Array.isArray(result.value)) {
+          result.value._aegis = {
+            command_index: index,
+            event_span: {
+              start: eventStart,
+              end: eventEnd
+            }
+          };
+        }
+        return result;
       } catch (error) {
-        return { ok: false, error: String(error && error.message ? error.message : error) };
+        return {
+          ok: false,
+          error: String(error && error.message ? error.message : error)
+        };
       }
     });
   }
@@ -2347,6 +2415,8 @@
     drainEvents,
     queue,
     assignId,
-    currentPageState
+    currentPageState,
+    resolveTargetInfo,
+    waitState
   };
 })();

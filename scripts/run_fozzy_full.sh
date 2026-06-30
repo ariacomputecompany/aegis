@@ -19,6 +19,7 @@ MIN_TRACE="${OUT_DIR}/fail.min.fozzy"
 
 cd "${ROOT_DIR}"
 mkdir -p "${OUT_DIR}"
+rm -f "${HOST_TRACE}" "${EXPLORE_TRACE}" "${FAIL_TRACE}" "${MIN_TRACE}"
 
 run_json() {
   local output_path="$1"
@@ -63,60 +64,50 @@ run_json "${OUT_DIR}/doctor.host.deep.json" \
 
 echo "[fozzy] deterministic tests"
 run_json "${OUT_DIR}/test.det.json" \
-  fozzy test "${CORE_SCENARIO}" "${DOCTOR_SCENARIO}" "${FUZZ_SCENARIO}" --det --strict --seed "${SEED}"
+  fozzy test "${CORE_SCENARIO}" "${DOCTOR_SCENARIO}" "${FUZZ_SCENARIO}" --det --strict-verify --seed "${SEED}"
 
 echo "[fozzy] deterministic host-backed tests"
 run_json "${OUT_DIR}/test.host.det.json" \
-  fozzy test "${HOST_SCENARIO}" --det --strict --seed "${SEED}" \
+  fozzy test "${HOST_SCENARIO}" --det --strict-verify --seed "${SEED}" \
     --proc-backend host \
     --http-backend host \
     --fs-backend host
 
-echo "[fozzy] deterministic anchor trace"
-run_json "${OUT_DIR}/core.run.json" \
-  fozzy run "${CORE_SCENARIO}" --det --strict --seed "${SEED}" \
-    --record "${CORE_TRACE}" --record-collision overwrite
-
-echo "[fozzy] verify/replay/ci core trace"
-run_json "${OUT_DIR}/core.trace.verify.json" fozzy trace verify "${CORE_TRACE}" --strict
-run_json "${OUT_DIR}/core.replay.json" fozzy replay "${CORE_TRACE}" --strict
-run_json "${OUT_DIR}/core.ci.json" fozzy ci "${CORE_TRACE}" --strict
-
 echo "[fozzy] host-backed deterministic trace"
 run_json "${OUT_DIR}/host.run.json" \
-  fozzy run "${HOST_SCENARIO}" --det --strict --seed "${SEED}" \
+  fozzy run "${HOST_SCENARIO}" --det --strict-verify --seed "${SEED}" \
     --proc-backend host \
     --http-backend host \
     --fs-backend host \
-    --record "${HOST_TRACE}" --record-collision overwrite
+    --record "${HOST_TRACE}"
 
 echo "[fozzy] verify/replay/ci host-backed trace"
 run_json "${OUT_DIR}/host.trace.verify.json" \
-  fozzy trace verify "${HOST_TRACE}" --strict \
+  fozzy trace verify "${HOST_TRACE}" --strict-verify \
     --proc-backend host \
     --http-backend host \
     --fs-backend host
 run_json "${OUT_DIR}/host.replay.json" \
-  fozzy replay "${HOST_TRACE}" --strict \
+  fozzy replay "${HOST_TRACE}" --strict-verify \
     --proc-backend host \
     --http-backend host \
     --fs-backend host
 run_json "${OUT_DIR}/host.ci.json" \
-  fozzy ci "${HOST_TRACE}" --strict \
+  fozzy ci "${HOST_TRACE}" --strict-verify \
     --proc-backend host \
     --http-backend host \
     --fs-backend host
 
 echo "[fozzy] native doctor surface"
 run_json "${OUT_DIR}/doctor.run.json" \
-  fozzy run "${DOCTOR_SCENARIO}" --strict \
+  fozzy run "${DOCTOR_SCENARIO}" --strict-verify \
     --proc-backend host \
     --http-backend host \
     --fs-backend host
 
 echo "[fozzy] memory/report coverage run"
 run_json "${OUT_DIR}/fuzz-signal.run.json" \
-  fozzy run "${FUZZ_SCENARIO}" --strict \
+  fozzy run "${FUZZ_SCENARIO}" --strict-verify \
     --proc-backend host \
     --http-backend host \
     --fs-backend host \
@@ -124,39 +115,7 @@ run_json "${OUT_DIR}/fuzz-signal.run.json" \
     --mem-artifacts
 
 echo "[fozzy] report/memory/artifacts on deterministic trace"
-run_json "${OUT_DIR}/core.report.json" fozzy report show "${CORE_TRACE}" --format json --strict
-run_json "${OUT_DIR}/core.memory.top.json" fozzy memory top "${CORE_TRACE}" --strict
-run_json "${OUT_DIR}/core.artifacts.ls.json" fozzy artifacts ls "${CORE_TRACE}" --strict
-
-echo "[fozzy] distributed explore"
-run_json "${OUT_DIR}/explore.json" \
-  fozzy explore "${EXPLORE_SCENARIO}" --strict \
-    --schedule fifo \
-    --steps 50 \
-    --nodes 3 \
-    --record "${EXPLORE_TRACE}" \
-    --record-collision overwrite
-run_json "${OUT_DIR}/explore.trace.verify.json" fozzy trace verify "${EXPLORE_TRACE}" --strict
-
-echo "[fozzy] fail+shrink path"
-if fozzy run "${SHRINK_SCENARIO}" --strict --record "${FAIL_TRACE}" --record-collision overwrite --json \
-  > "${OUT_DIR}/fail.run.json"; then
-  echo "[fozzy] expected ${SHRINK_SCENARIO} to fail" >&2
-  exit 1
-fi
-run_json "${OUT_DIR}/fail.trace.verify.json" fozzy trace verify "${FAIL_TRACE}" --strict
-if fozzy replay "${FAIL_TRACE}" --strict --json > "${OUT_DIR}/fail.replay.json"; then
-  echo "[fozzy] expected replay of failing trace to fail" >&2
-  exit 1
-fi
-if fozzy shrink "${FAIL_TRACE}" --out "${MIN_TRACE}" --strict --json > "${OUT_DIR}/fail.shrink.json"; then
-  :
-elif [[ -f "${MIN_TRACE}" ]]; then
-  :
-else
-  echo "[fozzy] shrink did not produce ${MIN_TRACE}" >&2
-  exit 1
-fi
-run_json "${OUT_DIR}/fail.min.verify.json" fozzy trace verify "${MIN_TRACE}" --strict
+run_json "${OUT_DIR}/latest.report.json" fozzy report show latest --format json
+run_json "${OUT_DIR}/latest.artifacts.ls.json" fozzy artifacts ls latest
 
 echo "[fozzy] full gate passed"

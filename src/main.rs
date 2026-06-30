@@ -132,8 +132,8 @@ enum Commands {
 
 #[derive(Clone, Subcommand)]
 enum TraceCommands {
-    #[command(about = "Replay a recorded Aegis trace file")]
-    Replay { path: PathBuf },
+    #[command(about = "Inspect a recorded Aegis trace file")]
+    Inspect { path: PathBuf },
 }
 
 #[derive(Clone, Subcommand)]
@@ -296,8 +296,8 @@ Insert a credential manually:
 Remove one credential:
   aegis config credentials-remove --profile work --origin https://github.com --username saint
 
-Replay a trace:
-  aegis trace replay traces/run.fozzy
+Inspect a trace:
+  aegis trace inspect traces/run.fozzy
 
 Inspect native paths:
   aegis native paths";
@@ -318,7 +318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match &command {
         Commands::Trace {
-            command: TraceCommands::Replay { path },
+            command: TraceCommands::Inspect { path },
         } => {
             let state = replay_trace(path.clone())?;
             println!(
@@ -433,7 +433,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Open => unreachable!("handled before runtime startup"),
         Commands::Trace { command } => match command {
-            TraceCommands::Replay { .. } => unreachable!("handled before host init"),
+            TraceCommands::Inspect { .. } => unreachable!("handled before host init"),
         },
         Commands::Usage => unreachable!("handled before host init"),
         Commands::Version => unreachable!("handled before host init"),

@@ -9,7 +9,6 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::command::{Command, CommandResult, CommandTarget, UploadFilePayload};
-use crate::commands::matcher::{DesiredAction, resolve_command_target};
 use crate::dom::diff::DomMutation;
 use crate::dom::node::DomSnapshot;
 use crate::dom::tree::DomTree;
@@ -195,6 +194,26 @@ const MIN_WAIT_POLL_INTERVAL_MS: u64 = 10;
 
 type PendingBatchFlush = (Vec<CommandResult>, Vec<SequencedEvent>, Option<DomSnapshot>);
 
+#[derive(Debug, Clone, Copy, Default)]
+struct CommandEventSpan {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct WaitEventSummary {
+    dom_changed: bool,
+    navigation_changed: bool,
+    network_changed: bool,
+    log_changed: bool,
+    media_signal_changed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LiveResolvedTarget {
+    target_id: u64,
+}
+
 impl AegisRuntime {
     pub fn new(
         bridge: CefBridge,
@@ -230,7 +249,7 @@ impl AegisRuntime {
         if commands_need_interaction_diagnostics(commands) {
             self.network_event_capture_enabled = true;
         }
-        self.ensure_runtime_bootstrapped(self.commands_require_dom_snapshot(commands))?;
+        self.ensure_runtime_bootstrapped(false)?;
         let batch_id = self.scheduler.next_batch_id();
         let request = BatchRequest {
             batch_id,
@@ -486,26 +505,6 @@ impl AegisRuntime {
         Ok(())
     }
 
-    fn commands_require_dom_snapshot(&self, commands: &[Command]) -> bool {
-        commands.iter().any(|command| match command {
-            Command::Click { target }
-            | Command::Hover { target }
-            | Command::SetValue { target, .. }
-            | Command::SetFiles { target, .. }
-            | Command::Drag { target, .. }
-            | Command::Geometry { target } => self.command_target_requires_snapshot(target),
-            Command::PressKey {
-                target: Some(target),
-                ..
-            }
-            | Command::WaitFor {
-                target: Some(target),
-                ..
-            } => self.command_target_requires_snapshot(target),
-            _ => false,
-        })
-    }
-
     fn refresh_dom_snapshot(&mut self) -> Result<(), AegisError> {
         let _ = self.drain_pending_events()?;
         let snapshot = self.bridge.snapshot_dom()?;
@@ -584,208 +583,69 @@ impl AegisRuntime {
             return Ok((Vec::new(), Vec::new(), None));
         }
 
-        let mut results = Vec::new();
-        let mut all_events = Vec::new();
-        let mut final_snapshot = None;
+        let mut results = vec![CommandResult::err("command not executed"); commands.len()];
+        let mut prepared_commands = Vec::new();
+        let mut prepared_positions = Vec::new();
 
-        for command in commands {
-            if self.command_target_needs_fresh_snapshot(command)
-                && let Err(error) = self.refresh_dom_snapshot()
-            {
-                results.push(CommandResult::err(error.to_string()));
-                continue;
-            }
-            let resolved = match self.resolve_command_for_bridge(command) {
-                Ok(command) => command,
-                Err(error) => {
-                    results.push(error);
-                    continue;
+        for (index, command) in commands.iter().enumerate() {
+            match self.prepare_command_for_bridge(command) {
+                Ok(prepared) => {
+                    prepared_positions.push(index);
+                    prepared_commands.push(prepared);
                 }
-            };
-
-            let request = BatchRequest {
-                batch_id,
-                commands: vec![resolved],
-            };
-            let response = self
-                .bridge
-                .send_batch(&request, self.network_event_capture_enabled)?;
-            let response_results = response.results.clone();
-            final_snapshot = response.snapshot.clone().or(final_snapshot);
-            let emitted_events = self.apply_response(response)?;
-            let annotated_results = response_results
-                .into_iter()
-                .map(|result| {
-                    self.annotate_command_result(command, result, &all_events, &emitted_events)
-                })
-                .collect::<Vec<_>>();
-            results.extend(annotated_results);
-            all_events.extend(emitted_events);
-            let _ = self.refresh_live_state(true);
-        }
-
-        Ok((results, all_events, final_snapshot))
-    }
-
-    fn command_target_needs_fresh_snapshot(&self, command: &Command) -> bool {
-        matches!(
-            command,
-            Command::Click {
-                target: CommandTarget::Match { .. }
-            } | Command::Hover {
-                target: CommandTarget::Match { .. }
-            } | Command::SetValue {
-                target: CommandTarget::Match { .. },
-                ..
-            } | Command::SetFiles {
-                target: CommandTarget::Match { .. },
-                ..
-            } | Command::Drag {
-                target: CommandTarget::Match { .. },
-                ..
-            } | Command::Geometry {
-                target: CommandTarget::Match { .. }
-            } | Command::PressKey {
-                target: Some(CommandTarget::Match { .. }),
-                ..
+                Err(error) => results[index] = error,
             }
-        ) && match command {
-            Command::Click { target }
-            | Command::Hover { target }
-            | Command::SetValue { target, .. }
-            | Command::SetFiles { target, .. }
-            | Command::Drag { target, .. }
-            | Command::Geometry { target } => self.command_target_requires_snapshot(target),
-            Command::PressKey {
-                target: Some(target),
-                ..
-            } => self.command_target_requires_snapshot(target),
-            _ => false,
         }
+
+        if prepared_commands.is_empty() {
+            return Ok((results, Vec::new(), None));
+        }
+
+        let request = BatchRequest {
+            batch_id,
+            commands: prepared_commands.clone(),
+        };
+        let response = self
+            .bridge
+            .send_batch(&request, self.network_event_capture_enabled)?;
+        let response_results = response.results.clone();
+        let final_snapshot = response.snapshot.clone();
+        let emitted_events = self.apply_response(response)?;
+        let previous_global_sequence = emitted_events
+            .first()
+            .map(|event| event.sequence.saturating_sub(1))
+            .or_else(|| self.events.oldest_sequence().map(|_| self.events.latest_sequence()));
+
+        for (bridge_index, mut result) in response_results.into_iter().enumerate() {
+            let command_index = prepared_positions[bridge_index];
+            let span = extract_command_event_span(&mut result.value);
+            let command_events =
+                command_events_for_span(&emitted_events, span, prepared_commands.len());
+            let prior_event_sequence =
+                command_prior_event_sequence(previous_global_sequence, &emitted_events, span);
+            results[command_index] = self.annotate_command_result(
+                &commands[command_index],
+                result,
+                prior_event_sequence,
+                command_events,
+            );
+        }
+
+        let _ = self.refresh_live_state(true);
+        Ok((results, emitted_events, final_snapshot))
     }
 
-    fn resolve_command_for_bridge(&self, command: &Command) -> Result<Command, CommandResult> {
-        let snapshot = self.dom.snapshot();
+    fn prepare_command_for_bridge(&self, command: &Command) -> Result<Command, CommandResult> {
         match command {
-            Command::Click { target } => Ok(Command::Click {
-                target: self.resolve_target_for_bridge(
-                    &snapshot,
-                    target,
-                    Some(DesiredAction::Click),
-                )?,
-            }),
-            Command::Hover { target } => Ok(Command::Hover {
-                target: self.resolve_target_for_bridge(
-                    &snapshot,
-                    target,
-                    Some(DesiredAction::Hover),
-                )?,
-            }),
-            Command::SetValue { target, value } => Ok(Command::SetValue {
-                target: self.resolve_target_for_bridge(
-                    &snapshot,
-                    target,
-                    Some(DesiredAction::Type),
-                )?,
-                value: value.clone(),
-            }),
             Command::SetFiles { target, paths, .. } => Ok(Command::SetFiles {
-                target: self.resolve_target_for_bridge(
-                    &snapshot,
-                    target,
-                    Some(DesiredAction::Type),
-                )?,
+                target: target.clone(),
                 paths: paths.clone(),
                 files: Some(load_upload_payloads(
                     paths,
                     self.browser_config.upload_dir.as_deref(),
                 )?),
             }),
-            Command::PressKey {
-                target,
-                key,
-                code,
-                alt_key,
-                ctrl_key,
-                meta_key,
-                shift_key,
-            } => Ok(Command::PressKey {
-                target: target
-                    .as_ref()
-                    .map(|target| {
-                        self.resolve_target_for_bridge(
-                            &snapshot,
-                            target,
-                            Some(DesiredAction::PressKey),
-                        )
-                    })
-                    .transpose()?,
-                key: key.clone(),
-                code: code.clone(),
-                alt_key: *alt_key,
-                ctrl_key: *ctrl_key,
-                meta_key: *meta_key,
-                shift_key: *shift_key,
-            }),
-            Command::Drag {
-                target,
-                delta_x,
-                delta_y,
-                to_x,
-                to_y,
-                steps,
-                handle,
-            } => Ok(Command::Drag {
-                target: self.resolve_target_for_bridge(
-                    &snapshot,
-                    target,
-                    Some(DesiredAction::Hover),
-                )?,
-                delta_x: *delta_x,
-                delta_y: *delta_y,
-                to_x: *to_x,
-                to_y: *to_y,
-                steps: *steps,
-                handle: handle.clone(),
-            }),
-            Command::Geometry { target } => Ok(Command::Geometry {
-                target: self.resolve_target_for_bridge(&snapshot, target, None)?,
-            }),
-            Command::MediaState { .. } => Ok(command.clone()),
             _ => Ok(command.clone()),
-        }
-    }
-
-    fn resolve_target_for_bridge(
-        &self,
-        snapshot: &DomSnapshot,
-        target: &CommandTarget,
-        action: Option<DesiredAction>,
-    ) -> Result<CommandTarget, CommandResult> {
-        if !self.command_target_requires_snapshot(target) {
-            return Ok(target.clone());
-        }
-        self.resolve_target_id(snapshot, target, action)
-    }
-
-    fn command_target_requires_snapshot(&self, target: &CommandTarget) -> bool {
-        match target {
-            CommandTarget::Id { .. } => false,
-            CommandTarget::Match { matcher } => matcher.selector.is_none(),
-        }
-    }
-
-    fn resolve_target_id(
-        &self,
-        snapshot: &DomSnapshot,
-        target: &CommandTarget,
-        action: Option<DesiredAction>,
-    ) -> Result<CommandTarget, CommandResult> {
-        match target {
-            CommandTarget::Id { .. } => Ok(target.clone()),
-            CommandTarget::Match { matcher } => resolve_command_target(snapshot, target, action)
-                .map(|node| CommandTarget::Id { id: node.id })
-                .ok_or_else(|| CommandResult::err(format!("no node matched {}", json!(matcher)))),
         }
     }
 
@@ -816,14 +676,47 @@ impl AegisRuntime {
             .unwrap_or(DEFAULT_WAIT_POLL_INTERVAL_MS)
             .max(MIN_WAIT_POLL_INTERVAL_MS);
         let deadline = now_ms().saturating_add(timeout_ms);
-        let initial_scroll = self.live_wait_state(selector.as_deref())?;
+        let needs_live_wait = selector.is_some()
+            || scroll_x.is_some()
+            || scroll_y.is_some()
+            || scroll_changed.unwrap_or(false)
+            || animation_idle_ms.is_some();
+        let needs_page_state = url_contains.is_some()
+            || title_contains.is_some()
+            || ready_state.is_some()
+            || media_current_src_contains.is_some()
+            || media_ready_state_at_least.is_some()
+            || media_duration_known.is_some();
+        let needs_dom = target.is_some() || text.is_some();
+        let initial_scroll = if needs_live_wait {
+            self.live_wait_state(selector.as_deref())?
+        } else {
+            WaitLiveState::default()
+        };
         let mut animation_idle_since_ms = None;
+        let mut dom_dirty = needs_dom;
+        let mut live_state_dirty = needs_live_wait || needs_page_state;
 
         loop {
             let _ = self.bridge.pump();
-            let _ = self.drain_pending_events();
+            let drained_events = self.drain_pending_events().unwrap_or_default();
             let _ = self.refresh_host_state();
-            let _ = self.refresh_live_state(true);
+            let event_summary = WaitEventSummary::from_events(&drained_events);
+            dom_dirty |= event_summary.dom_changed || event_summary.navigation_changed;
+            live_state_dirty |= event_summary.navigation_changed
+                || event_summary.dom_changed
+                || event_summary.network_changed
+                || event_summary.log_changed
+                || event_summary.media_signal_changed;
+
+            if live_state_dirty && (needs_live_wait || needs_page_state) {
+                let _ = self.refresh_live_state(true);
+                live_state_dirty = false;
+            }
+            if dom_dirty && needs_dom {
+                let _ = self.refresh_dom_snapshot();
+                dom_dirty = false;
+            }
 
             if self.host_state.cancel_requested {
                 return Ok(CommandResult::err("wait_for cancelled"));
@@ -843,7 +736,7 @@ impl AegisRuntime {
                 *media_ready_state_at_least,
                 *media_duration_known,
                 *animation_idle_ms,
-                &initial_scroll,
+                needs_live_wait.then_some(&initial_scroll),
                 &mut animation_idle_since_ms,
             )? {
                 return Ok(CommandResult::ok(json!({
@@ -868,26 +761,10 @@ impl AegisRuntime {
         target: Option<&CommandTarget>,
     ) -> Result<CommandResult, AegisError> {
         self.refresh_live_state(true)?;
-        let resolved_target = if let Some(target) = target {
-            if self.command_target_requires_snapshot(target) {
-                self.refresh_dom_snapshot()?;
-            }
-            Some(
-                self.resolve_target_id(&self.dom.snapshot(), target, None)
-                    .map_err(|error| {
-                        AegisError::Bridge(
-                            error
-                                .error
-                                .unwrap_or_else(|| "media target resolution failed".into()),
-                        )
-                    })?,
-            )
+        let target_id = if let Some(target) = target {
+            Some(self.resolve_live_target(target, None)?.target_id)
         } else {
             None
-        };
-        let target_id = match resolved_target {
-            Some(CommandTarget::Id { id }) => Some(id),
-            _ => None,
         };
         let media = self
             .media
@@ -901,6 +778,7 @@ impl AegisRuntime {
         })))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn wait_condition_satisfied(
         &mut self,
         target: Option<&CommandTarget>,
@@ -916,7 +794,7 @@ impl AegisRuntime {
         media_ready_state_at_least: Option<u8>,
         media_duration_known: Option<bool>,
         animation_idle_ms: Option<u64>,
-        initial_scroll: &WaitLiveState,
+        initial_scroll: Option<&WaitLiveState>,
         animation_idle_since_ms: &mut Option<u64>,
     ) -> Result<bool, AegisError> {
         if url_contains.is_some_and(|needle| {
@@ -967,19 +845,17 @@ impl AegisRuntime {
             return Ok(false);
         }
         if scroll_changed.unwrap_or(false)
-            && live_state.as_ref().is_some_and(|state| {
-                state.scroll_x == initial_scroll.scroll_x
-                    && state.scroll_y == initial_scroll.scroll_y
+            && initial_scroll.is_some_and(|initial| {
+                live_state.as_ref().is_some_and(|state| {
+                    state.scroll_x == initial.scroll_x && state.scroll_y == initial.scroll_y
+                })
             })
         {
             return Ok(false);
         }
 
-        if target.is_some() || text.is_some() {
-            self.refresh_dom_snapshot()?;
-        }
         if let Some(target) = target
-            && resolve_command_target(&self.dom.snapshot(), target, None).is_none()
+            && self.resolve_live_target(target, None).is_err()
         {
             return Ok(false);
         }
@@ -1033,30 +909,8 @@ impl AegisRuntime {
     }
 
     fn live_wait_state(&mut self, selector: Option<&str>) -> Result<WaitLiveState, AegisError> {
-        let selector_json =
-            serde_json::to_string(&selector.unwrap_or_default()).map_err(AegisError::Serialize)?;
-        let script = format!(
-            r#"(() => {{
-                const selector = {selector_json};
-                let selectorFound = false;
-                if (selector) {{
-                    try {{
-                        selectorFound = !!document.querySelector(selector);
-                    }} catch (_error) {{
-                        selectorFound = false;
-                    }}
-                }}
-                const animations = typeof document.getAnimations === "function"
-                    ? document.getAnimations().some((animation) => animation.playState === "running")
-                    : false;
-                return JSON.stringify({{
-                    scroll_x: Number.isFinite(window.scrollX) ? window.scrollX : null,
-                    scroll_y: Number.isFinite(window.scrollY) ? window.scrollY : null,
-                    selector_found: selectorFound,
-                    animations_running: animations
-                }});
-            }})()"#
-        );
+        let selector_json = serde_json::to_string(&selector).map_err(AegisError::Serialize)?;
+        let script = format!("JSON.stringify(window.__aegis.waitState({selector_json}))");
         let raw = self.bridge.eval_js(&script)?;
         serde_json::from_str(&raw)
             .map_err(|error| AegisError::Bridge(format!("wait state json parse error: {error}")))
@@ -1180,7 +1034,7 @@ impl AegisRuntime {
         &self,
         command: &Command,
         mut result: CommandResult,
-        prior_events: &[SequencedEvent],
+        prior_event_sequence: Option<u64>,
         emitted_events: &[SequencedEvent],
     ) -> CommandResult {
         if !result.ok {
@@ -1191,18 +1045,33 @@ impl AegisRuntime {
         };
         let enriched = match command {
             Command::Click { .. } | Command::PressKey { .. } => {
-                annotate_interaction_value(value, prior_events, emitted_events)
+                annotate_interaction_value(value, prior_event_sequence, emitted_events)
             }
             _ => Value::Object(value),
         };
         result.value = Some(enriched);
         result
     }
+
+    fn resolve_live_target(
+        &mut self,
+        target: &CommandTarget,
+        action: Option<&str>,
+    ) -> Result<LiveResolvedTarget, AegisError> {
+        let target_json = serde_json::to_string(target).map_err(AegisError::Serialize)?;
+        let action_json = serde_json::to_string(&action).map_err(AegisError::Serialize)?;
+        let script = format!(
+            "JSON.stringify(window.__aegis.resolveTargetInfo({target_json}, {action_json}))"
+        );
+        let raw = self.bridge.eval_js(&script)?;
+        serde_json::from_str(&raw)
+            .map_err(|error| AegisError::Bridge(format!("target resolution json parse error: {error}")))
+    }
 }
 
 fn annotate_interaction_value(
     mut value: Map<String, Value>,
-    prior_events: &[SequencedEvent],
+    prior_event_sequence: Option<u64>,
     emitted_events: &[SequencedEvent],
 ) -> Value {
     let submit_intent = value
@@ -1348,10 +1217,52 @@ fn annotate_interaction_value(
             "websocket_frame_count": websocket_events,
             "auth_signal_kinds": signal_kinds,
             "emitted_event_count": emitted_events.len(),
-            "prior_event_sequence": prior_events.last().map(|event| event.sequence),
+            "prior_event_sequence": prior_event_sequence,
         }),
     );
     Value::Object(value)
+}
+
+fn extract_command_event_span(value: &mut Option<Value>) -> Option<CommandEventSpan> {
+    let object = value.as_mut()?.as_object_mut()?;
+    let aegis = object.remove("_aegis")?;
+    let span = aegis.get("event_span")?;
+    Some(CommandEventSpan {
+        start: span.get("start")?.as_u64()? as usize,
+        end: span.get("end")?.as_u64()? as usize,
+    })
+}
+
+fn command_events_for_span(
+    emitted_events: &[SequencedEvent],
+    span: Option<CommandEventSpan>,
+    command_count: usize,
+) -> &[SequencedEvent] {
+    let Some(span) = span else {
+        return if command_count == 1 { emitted_events } else { &[] };
+    };
+    if span.start > span.end || span.end > emitted_events.len() {
+        return if command_count == 1 { emitted_events } else { &[] };
+    }
+    &emitted_events[span.start..span.end]
+}
+
+fn command_prior_event_sequence(
+    previous_global_sequence: Option<u64>,
+    emitted_events: &[SequencedEvent],
+    span: Option<CommandEventSpan>,
+) -> Option<u64> {
+    let Some(span) = span else {
+        return previous_global_sequence;
+    };
+    if span.start == 0 {
+        previous_global_sequence
+    } else {
+        emitted_events
+            .get(span.start.saturating_sub(1))
+            .map(|event| event.sequence)
+            .or(previous_global_sequence)
+    }
 }
 
 fn commands_need_interaction_diagnostics(commands: &[Command]) -> bool {
@@ -1361,6 +1272,27 @@ fn commands_need_interaction_diagnostics(commands: &[Command]) -> bool {
             Command::Click { .. } | Command::PressKey { .. } | Command::SetValue { .. }
         )
     })
+}
+
+impl WaitEventSummary {
+    fn from_events(events: &[SequencedEvent]) -> Self {
+        let mut summary = Self::default();
+        for entry in events {
+            match &entry.event {
+                RuntimeEvent::DomMutation { .. } => summary.dom_changed = true,
+                RuntimeEvent::Navigation { .. } => summary.navigation_changed = true,
+                RuntimeEvent::Network { .. } => summary.network_changed = true,
+                RuntimeEvent::Log { message, .. } => {
+                    summary.log_changed = true;
+                    if message.starts_with("media:") {
+                        summary.media_signal_changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        summary
+    }
 }
 
 fn includes_normalized(haystack: &str, needle: &str) -> bool {

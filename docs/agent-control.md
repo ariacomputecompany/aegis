@@ -213,10 +213,10 @@ Runtime event types:
 
 ## Traces
 
-Replay a recorded trace:
+Inspect a recorded trace:
 
 ```bash
-aegis trace replay traces/run.json
+aegis trace inspect traces/run.json
 ```
 
 Use trace recording for:

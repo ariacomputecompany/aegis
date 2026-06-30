@@ -265,7 +265,7 @@ pub fn build_native(
     if platform == NativePlatform::Macos {
         args.push("--config".to_string());
         args.push(configuration.as_str().to_string());
-    } else if let Some(parallelism) = std::thread::available_parallelism().ok() {
+    } else if let Ok(parallelism) = std::thread::available_parallelism() {
         args.push("--parallel".to_string());
         args.push(parallelism.get().to_string());
     }

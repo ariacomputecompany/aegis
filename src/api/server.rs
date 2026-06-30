@@ -180,6 +180,7 @@ enum EventMatcher {
 }
 
 impl EventFilter {
+    #[allow(clippy::result_large_err)]
     fn from_query(raw_filters: &[String]) -> Result<Option<Self>, ApiError> {
         let mut matchers = Vec::new();
         for raw in raw_filters {
@@ -987,10 +988,10 @@ pub fn serve_main_thread(
             let listener = tokio::net::TcpListener::bind(addr)
                 .await
                 .map_err(|error| AegisError::Bridge(error.to_string()))?;
-            if let Some(default_state) = root_for_server.default_context_state() {
-                if let Ok(mut startup) = default_state.startup.lock() {
-                    startup.api_bind_ms = bind_started.elapsed().as_millis() as u64;
-                }
+            if let Some(default_state) = root_for_server.default_context_state()
+                && let Ok(mut startup) = default_state.startup.lock()
+            {
+                startup.api_bind_ms = bind_started.elapsed().as_millis() as u64;
             }
             eprintln!("Aegis serve ready on http://{}", addr);
             let _ = bind_tx.send(Ok(()));
@@ -1033,9 +1034,7 @@ pub fn serve_main_thread(
             )),
         },
     };
-    if let Err(error) = result {
-        return Err(error);
-    }
+    result?;
     server_result?;
     Ok(())
 }
@@ -1375,6 +1374,7 @@ fn origin_key(url: &str) -> String {
     trimmed.to_string()
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_context_name(name: &str) -> Result<(), ApiError> {
     if name.trim().is_empty() {
         return Err(ApiError::from(AegisError::Bridge(
@@ -1404,6 +1404,7 @@ impl ServeRootState {
             .and_then(|contexts| contexts.get(context_id).cloned())
     }
 
+    #[allow(clippy::result_large_err)]
     fn insert_context(&self, context_id: String, state: ApiState) -> Result<(), ApiError> {
         let mut contexts = self.contexts.lock().map_err(|_| {
             ApiError::from(AegisError::Bridge("context registry lock poisoned".into()))
@@ -1412,6 +1413,7 @@ impl ServeRootState {
         Ok(())
     }
 
+    #[allow(clippy::result_large_err)]
     fn remove_context(&self, context_id: &str) -> Result<Option<ApiState>, ApiError> {
         let mut contexts = self.contexts.lock().map_err(|_| {
             ApiError::from(AegisError::Bridge("context registry lock poisoned".into()))
@@ -1419,6 +1421,7 @@ impl ServeRootState {
         Ok(contexts.remove(context_id))
     }
 
+    #[allow(clippy::result_large_err)]
     fn list_contexts(&self) -> Result<Vec<ContextSummary>, ApiError> {
         let contexts = self.contexts.lock().map_err(|_| {
             ApiError::from(AegisError::Bridge("context registry lock poisoned".into()))
@@ -1512,11 +1515,13 @@ pub fn router(state: ServeRootState) -> Router {
         .with_state(state)
 }
 
+#[allow(clippy::result_large_err)]
 fn require_default_context_state(root: &ServeRootState) -> Result<ApiState, ApiError> {
     root.default_context_state()
         .ok_or_else(|| ApiError::from(AegisError::Bridge("default context unavailable".into())))
 }
 
+#[allow(clippy::result_large_err)]
 fn require_context_state(root: &ServeRootState, context_id: &str) -> Result<ApiState, ApiError> {
     root.context_state(context_id)
         .ok_or_else(|| ApiError::not_found(format!("context `{context_id}` was not found")))
@@ -4215,9 +4220,8 @@ impl ServeDiagnostics {
             || !host.browser_available
             || !host.renderer_ready
             || !host.runtime_ready
+            || self.last_failure.is_some()
         {
-            RuntimeOperationalState::Degraded
-        } else if self.last_failure.is_some() {
             RuntimeOperationalState::Degraded
         } else if runtime_operational
             && self
