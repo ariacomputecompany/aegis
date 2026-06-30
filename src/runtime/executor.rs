@@ -156,6 +156,38 @@ struct WaitLiveState {
     animations_running: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchHeading {
+    pub level: Option<u8>,
+    pub text: String,
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchLink {
+    pub index: usize,
+    pub text: String,
+    pub href: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchData {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub visible_text: String,
+    #[serde(default)]
+    pub headings: Vec<PageResearchHeading>,
+    #[serde(default)]
+    pub links: Vec<PageResearchLink>,
+    #[serde(default)]
+    pub likely_not_found: bool,
+    #[serde(default)]
+    pub not_found_signals: Vec<String>,
+    pub suggested_search_query: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
     pub batch_id: u64,
@@ -402,6 +434,15 @@ impl AegisRuntime {
     pub fn snapshot_dom(&mut self) -> Result<crate::dom::node::DomSnapshot, AegisError> {
         self.refresh_dom_snapshot()?;
         Ok(self.dom.snapshot())
+    }
+
+    pub fn page_research_data(&mut self) -> Result<PageResearchData, AegisError> {
+        self.refresh_live_state(true)?;
+        let raw = self
+            .bridge
+            .eval_js("JSON.stringify(window.__aegis.pageResearchData())")?;
+        serde_json::from_str(&raw)
+            .map_err(|error| AegisError::Bridge(format!("page research json parse error: {error}")))
     }
 
     pub fn event_stream(&self) -> &EventStream {

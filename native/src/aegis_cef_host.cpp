@@ -2723,11 +2723,13 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         "(() => !!(window.__aegis && typeof window.__aegis.snapshot === 'function' && "
         "typeof window.__aegis.drainEvents === 'function' && "
         "typeof window.__aegis.currentPageState === 'function' && "
+        "typeof window.__aegis.pageResearchData === 'function' && "
         "typeof window.__aegis.drag === 'function' && "
         "typeof window.__aegis.geometry === 'function'))()");
     if (TrimAscii(probe) != "true") {
       InvalidateRuntime("renderer runtime api probe failed");
-      throw std::runtime_error("renderer runtime api is unavailable");
+      throw std::runtime_error(
+          "renderer runtime api is unavailable or missing required research helpers");
     }
     {
       std::lock_guard lock(mutex_);

@@ -18,6 +18,8 @@ use aegis::{
     configure_native, ensure_workspace_serve_runtime, native, replay_trace, resolve_transfer_paths,
 };
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 #[derive(Parser)]
 #[command(name = "aegis")]
@@ -72,6 +74,14 @@ struct Cli {
     )]
     #[arg(long, global = true)]
     upload_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        default_value = "127.0.0.1:7878",
+        help = "Address of a running `aegis serve` control plane for client commands like search, navigate, and page workflows."
+    )]
+    #[arg(long, global = true, default_value = "127.0.0.1:7878")]
+    server_addr: SocketAddr,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -113,6 +123,22 @@ enum Commands {
     Usage,
     #[command(about = "Show example commands for common Aegis workflows")]
     Examples,
+    #[command(about = "Navigate a running Aegis serve runtime to a URL")]
+    Navigate {
+        url: String,
+    },
+    #[command(about = "Run a first-class web search in a running Aegis serve runtime")]
+    Search {
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        #[arg(long)]
+        engine: Option<String>,
+    },
+    #[command(about = "Read and act on the current page through a running Aegis serve runtime")]
+    Page {
+        #[command(subcommand)]
+        command: PageCommands,
+    },
     #[command(about = "Replay deterministic traces")]
     Trace {
         #[command(subcommand)]
@@ -134,6 +160,38 @@ enum Commands {
 enum TraceCommands {
     #[command(about = "Inspect a recorded Aegis trace file")]
     Inspect { path: PathBuf },
+}
+
+#[derive(Clone, Subcommand)]
+enum PageCommands {
+    #[command(about = "Inspect the structured current-page research snapshot")]
+    Inspect,
+    #[command(about = "Print visible page text")]
+    Text,
+    #[command(about = "Print a markdown projection of the current page")]
+    Markdown,
+    #[command(about = "List page headings")]
+    Headings,
+    #[command(about = "List page links")]
+    Links,
+    #[command(about = "Find text, headings, or links on the current page")]
+    Find {
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        #[arg(long)]
+        exact: bool,
+    },
+    #[command(about = "Open a page link by text match")]
+    OpenLink {
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        #[arg(long)]
+        exact: bool,
+        #[arg(long)]
+        href_contains: Option<String>,
+        #[arg(long)]
+        index: Option<usize>,
+    },
 }
 
 #[derive(Clone, Subcommand)]
@@ -256,7 +314,15 @@ Aegis production usage
    aegis config get credentials
    aegis config credentials-list --profile default
 
-5. Native maintenance:
+5. Research through a running control plane:
+   aegis --server-addr 127.0.0.1:7878 search shopify app review
+   aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
+   aegis --server-addr 127.0.0.1:7878 page text
+   aegis --server-addr 127.0.0.1:7878 page find release an app version
+   aegis --server-addr 127.0.0.1:7878 page links
+   aegis --server-addr 127.0.0.1:7878 page open-link release an app version
+
+6. Native maintenance:
  aegis native paths
   aegis native doctor
   aegis native build --configuration release --target aegis_host
@@ -298,6 +364,16 @@ Remove one credential:
 
 Inspect a trace:
   aegis trace inspect traces/run.fozzy
+
+Research through a running serve process:
+  aegis --server-addr 127.0.0.1:7878 search shopify app review
+  aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
+  aegis --server-addr 127.0.0.1:7878 page inspect
+  aegis --server-addr 127.0.0.1:7878 page text
+  aegis --server-addr 127.0.0.1:7878 page markdown
+  aegis --server-addr 127.0.0.1:7878 page find redirect to your app's ui
+  aegis --server-addr 127.0.0.1:7878 page links
+  aegis --server-addr 127.0.0.1:7878 page open-link release an app version
 
 Inspect native paths:
   aegis native paths";
@@ -384,6 +460,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{EXAMPLES_TEXT}");
             return Ok(());
         }
+        Commands::Navigate { url } => {
+            let value = serve_json_request(
+                cli.server_addr,
+                "POST",
+                "/navigate",
+                Some(&json!({ "url": url })),
+            )?;
+            print_json_value(&value)?;
+            return Ok(());
+        }
+        Commands::Search { query, engine } => {
+            let value = serve_json_request(
+                cli.server_addr,
+                "POST",
+                "/search",
+                Some(&json!({
+                    "query": query.join(" "),
+                    "engine": engine
+                })),
+            )?;
+            print_json_value(&value)?;
+            return Ok(());
+        }
+        Commands::Page { command } => {
+            handle_page_command(cli.server_addr, command.clone())?;
+            return Ok(());
+        }
         Commands::Config { command } => {
             handle_config_command(command.clone(), &cli.profile)?;
             return Ok(());
@@ -438,11 +541,159 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Usage => unreachable!("handled before host init"),
         Commands::Version => unreachable!("handled before host init"),
         Commands::Examples => unreachable!("handled before host init"),
+        Commands::Navigate { .. } => unreachable!("handled before host init"),
+        Commands::Search { .. } => unreachable!("handled before host init"),
+        Commands::Page { .. } => unreachable!("handled before host init"),
         Commands::Config { .. } => unreachable!("handled before host init"),
         Commands::Native { .. } => unreachable!("handled before runtime startup"),
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct CliApiErrorBody {
+    error: String,
+    code: String,
+    suggested_action: Option<String>,
+}
+
+fn print_json_value(value: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn handle_page_command(
+    addr: SocketAddr,
+    command: PageCommands,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        PageCommands::Inspect => {
+            let value = serve_json_request(addr, "GET", "/page", None)?;
+            print_json_value(&value)?;
+        }
+        PageCommands::Text => {
+            let value = serve_json_request(addr, "GET", "/page/text", None)?;
+            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                println!("{text}");
+            } else {
+                print_json_value(&value)?;
+            }
+        }
+        PageCommands::Markdown => {
+            let value = serve_json_request(addr, "GET", "/page/markdown", None)?;
+            if let Some(markdown) = value.get("markdown").and_then(Value::as_str) {
+                println!("{markdown}");
+            } else {
+                print_json_value(&value)?;
+            }
+        }
+        PageCommands::Headings => {
+            let value = serve_json_request(addr, "GET", "/page/headings", None)?;
+            print_json_value(&value)?;
+        }
+        PageCommands::Links => {
+            let value = serve_json_request(addr, "GET", "/page/links", None)?;
+            print_json_value(&value)?;
+        }
+        PageCommands::Find { text, exact } => {
+            let value = serve_json_request(
+                addr,
+                "POST",
+                "/page/find",
+                Some(&json!({
+                    "text": text.join(" "),
+                    "exact": exact
+                })),
+            )?;
+            print_json_value(&value)?;
+        }
+        PageCommands::OpenLink {
+            text,
+            exact,
+            href_contains,
+            index,
+        } => {
+            let value = serve_json_request(
+                addr,
+                "POST",
+                "/page/open-link",
+                Some(&json!({
+                    "text": text.join(" "),
+                    "exact": exact,
+                    "href_contains": href_contains,
+                    "index": index
+                })),
+            )?;
+            print_json_value(&value)?;
+        }
+    }
+    Ok(())
+}
+
+fn serve_json_request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|error| {
+        format!(
+            "could not reach Aegis serve at http://{addr}: {error}. Start it with `aegis serve --addr {addr}` first."
+        )
+    })?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let body_bytes = if let Some(body) = body {
+        serde_json::to_vec(body)?
+    } else {
+        Vec::new()
+    };
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    if !body_bytes.is_empty() {
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes())?;
+    if !body_bytes.is_empty() {
+        stream.write_all(&body_bytes)?;
+    }
+    let mut response_bytes = Vec::new();
+    stream.read_to_end(&mut response_bytes)?;
+    let header_end = response_bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or("invalid HTTP response from Aegis serve")?;
+    let (header_bytes, body_bytes) = response_bytes.split_at(header_end + 4);
+    let header_text = std::str::from_utf8(header_bytes)?;
+    let status_line = header_text
+        .lines()
+        .next()
+        .ok_or("missing HTTP status line from Aegis serve")?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or("missing HTTP status code from Aegis serve")?
+        .parse::<u16>()?;
+    let body_slice = &body_bytes[0..body_bytes.len()];
+    let body_text = std::str::from_utf8(body_slice)?.trim();
+    if !(200..300).contains(&status) {
+        if let Ok(error) = serde_json::from_str::<CliApiErrorBody>(body_text) {
+            let mut message = format!("Aegis API {method} {path} failed ({status}): {}", error.error);
+            message.push_str(&format!(" [code={}]", error.code));
+            if let Some(suggested_action) = error.suggested_action {
+                message.push_str(&format!("\nSuggested action: {suggested_action}"));
+            }
+            return Err(message.into());
+        }
+        return Err(format!("Aegis API {method} {path} failed ({status}): {body_text}").into());
+    }
+    if body_text.is_empty() {
+        Ok(Value::Null)
+    } else {
+        Ok(serde_json::from_str(body_text)?)
+    }
 }
 
 fn resolve_default_serve_host_lib(

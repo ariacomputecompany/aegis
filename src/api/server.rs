@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_stream::stream;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, State, rejection::JsonRejection};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -32,7 +32,10 @@ use crate::config_store::{
 use crate::dom::node::{DomNode, DomSnapshot};
 use crate::events::stream::{EventReadWindow, EventType, RuntimeEvent, SequencedEvent};
 use crate::host::{LoadedAegisClient, RuntimeCancelHandle};
-use crate::runtime::executor::{ExecutionReport, PageBootstrapDiagnostics, RuntimeStatus};
+use crate::runtime::executor::{
+    ExecutionReport, PageBootstrapDiagnostics, PageResearchData, PageResearchHeading,
+    PageResearchLink, RuntimeStatus,
+};
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::AegisError;
@@ -151,6 +154,118 @@ pub struct TraceBody {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SearchBody {
+    pub query: String,
+    #[serde(default)]
+    pub engine: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PageFindBody {
+    pub text: String,
+    #[serde(default)]
+    pub exact: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PageOpenLinkBody {
+    pub text: String,
+    #[serde(default)]
+    pub exact: bool,
+    #[serde(default)]
+    pub href_contains: Option<String>,
+    #[serde(default)]
+    pub index: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    pub engine: String,
+    pub query: String,
+    pub url: String,
+    pub events: Vec<SequencedEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageTextResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub text: String,
+    pub likely_not_found: bool,
+    pub not_found_signals: Vec<String>,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageMarkdownResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub markdown: String,
+    pub likely_not_found: bool,
+    pub not_found_signals: Vec<String>,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageLinksResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub links: Vec<PageResearchLink>,
+    pub likely_not_found: bool,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageHeadingsResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub headings: Vec<PageResearchHeading>,
+    pub likely_not_found: bool,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageFindMatch {
+    pub kind: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageFindResponse {
+    pub query: String,
+    pub exact: bool,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub match_count: usize,
+    pub matches: Vec<PageFindMatch>,
+    pub likely_not_found: bool,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageOpenLinkResponse {
+    pub text: String,
+    pub exact: bool,
+    pub href_contains: Option<String>,
+    pub candidate_count: usize,
+    pub chosen: PageResearchLink,
+    pub events: Vec<SequencedEvent>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct EventQuery {
     #[serde(default)]
     pub since: u64,
@@ -266,6 +381,7 @@ enum ApiCommand {
         Vec<Command>,
         oneshot::Sender<Result<ExecutionReport, AegisError>>,
     ),
+    PageResearch(oneshot::Sender<Result<PageResearchData, AegisError>>),
     SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
     Events(u64, oneshot::Sender<Result<EventReadWindow, AegisError>>),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
@@ -860,6 +976,28 @@ impl MainThreadContext {
                 );
                 let _ = reply.send(result);
             }
+            ApiCommand::PageResearch(reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "page_research",
+                    "capturing page research snapshot",
+                );
+                let result = self.client.page_research_data();
+                record_operation_finished(
+                    &self.api.diagnostics,
+                    "page_research",
+                    &self.client,
+                    &result,
+                );
+                emit_operation_telemetry(
+                    "page_research",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
             ApiCommand::Events(since, reply) => {
                 let started_at = Instant::now();
                 record_operation_started(
@@ -1365,6 +1503,182 @@ fn includes_normalized(haystack: Option<&str>, needle: &str) -> bool {
         .is_some_and(|haystack| haystack.contains(&normalize_text(needle)))
 }
 
+fn search_engine_name(engine: Option<&str>) -> &'static str {
+    match engine.map(normalize_text).as_deref() {
+        Some("google") => "google",
+        Some("bing") => "bing",
+        _ => "duckduckgo",
+    }
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+            output.push(ch);
+        } else if ch == ' ' {
+            output.push('+');
+        } else {
+            output.push('%');
+            output.push_str(&format!("{byte:02X}"));
+        }
+    }
+    output
+}
+
+fn build_search_url(query: &str, engine: Option<&str>) -> String {
+    let encoded = percent_encode(query.trim());
+    match search_engine_name(engine) {
+        "google" => format!("https://www.google.com/search?q={encoded}"),
+        "bing" => format!("https://www.bing.com/search?q={encoded}"),
+        _ => format!("https://duckduckgo.com/?q={encoded}"),
+    }
+}
+
+fn render_page_markdown(page: &PageResearchData) -> String {
+    let mut sections = Vec::new();
+    if let Some(title) = page.title.as_ref()
+        && !title.trim().is_empty()
+    {
+        sections.push(format!("# {}", title.trim()));
+    }
+    if let Some(url) = page.url.as_ref() {
+        sections.push(format!("Source: {url}"));
+    }
+    if let Some(canonical_url) = page.canonical_url.as_ref()
+        && page.url.as_ref() != Some(canonical_url)
+    {
+        sections.push(format!("Canonical: {canonical_url}"));
+    }
+    if !page.headings.is_empty() {
+        sections.push(String::from("## Headings"));
+        sections.extend(page.headings.iter().map(|heading| {
+            let level = heading.level.unwrap_or(2).clamp(1, 6) as usize;
+            format!("{} {}", "#".repeat(level), heading.text)
+        }));
+    }
+    if !page.visible_text.trim().is_empty() {
+        sections.push(String::from("## Visible Text"));
+        sections.push(page.visible_text.clone());
+    }
+    if !page.links.is_empty() {
+        sections.push(String::from("## Links"));
+        sections.extend(page.links.iter().map(|link| {
+            let label = if link.text.trim().is_empty() {
+                link.href.clone()
+            } else {
+                link.text.clone()
+            };
+            format!("- [{label}]({})", link.href)
+        }));
+    }
+    sections.join("\n\n")
+}
+
+fn snippet_for_match(text: &str, normalized_query: &str) -> Option<String> {
+    if normalized_query.is_empty() {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let start = lower.find(normalized_query)?;
+    let end = start.saturating_add(normalized_query.len());
+    let snippet_start = start.saturating_sub(80);
+    let snippet_end = (end + 80).min(text.len());
+    Some(text[snippet_start..snippet_end].trim().to_string())
+}
+
+fn page_find_matches(page: &PageResearchData, query: &str, exact: bool) -> Vec<PageFindMatch> {
+    let normalized_query = normalize_text(query);
+    if normalized_query.is_empty() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for heading in &page.headings {
+        let candidate = normalize_text(&heading.text);
+        let matched = if exact {
+            candidate == normalized_query
+        } else {
+            candidate.contains(&normalized_query)
+        };
+        if matched {
+            matches.push(PageFindMatch {
+                kind: String::from("heading"),
+                text: heading.text.clone(),
+                level: heading.level,
+                href: None,
+                index: None,
+                snippet: Some(heading.text.clone()),
+            });
+        }
+    }
+    for link in &page.links {
+        let link_text = normalize_text(&link.text);
+        let href_text = normalize_text(&link.href);
+        let matched = if exact {
+            link_text == normalized_query || href_text == normalized_query
+        } else {
+            link_text.contains(&normalized_query) || href_text.contains(&normalized_query)
+        };
+        if matched {
+            matches.push(PageFindMatch {
+                kind: String::from("link"),
+                text: if link.text.trim().is_empty() {
+                    link.href.clone()
+                } else {
+                    link.text.clone()
+                },
+                level: None,
+                href: Some(link.href.clone()),
+                index: Some(link.index),
+                snippet: link.title.clone(),
+            });
+        }
+    }
+    if let Some(snippet) = snippet_for_match(&page.visible_text, &normalized_query) {
+        matches.push(PageFindMatch {
+            kind: String::from("text"),
+            text: query.to_string(),
+            level: None,
+            href: None,
+            index: None,
+            snippet: Some(snippet),
+        });
+    }
+    matches
+}
+
+fn matching_links(
+    page: &PageResearchData,
+    text: &str,
+    exact: bool,
+    href_contains: Option<&str>,
+) -> Vec<PageResearchLink> {
+    let normalized_text = normalize_text(text);
+    let normalized_href = href_contains.map(normalize_text);
+    page.links
+        .iter()
+        .filter(|link| {
+            let link_text = if link.text.trim().is_empty() {
+                link.href.as_str()
+            } else {
+                link.text.as_str()
+            };
+            let link_text = normalize_text(link_text);
+            let text_matches = if exact {
+                link_text == normalized_text
+            } else {
+                link_text.contains(&normalized_text)
+            };
+            let href_matches = normalized_href.as_ref().is_none_or(|needle| {
+                normalize_text(&link.href).contains(needle)
+            });
+            text_matches && href_matches
+        })
+        .cloned()
+        .collect()
+}
+
 fn origin_key(url: &str) -> String {
     let trimmed = url.trim();
     if let Some((scheme, rest)) = trimmed.split_once("://") {
@@ -1483,8 +1797,25 @@ pub fn router(state: ServeRootState) -> Router {
             "/contexts/{context_id}/session/load",
             post(context_load_session_profile),
         )
+        .route("/contexts/{context_id}/search", post(context_search))
         .route("/contexts/{context_id}/navigate", post(context_navigate))
         .route("/contexts/{context_id}/execute", post(context_execute))
+        .route("/contexts/{context_id}/page", get(context_page_research))
+        .route("/contexts/{context_id}/page/text", get(context_page_text))
+        .route(
+            "/contexts/{context_id}/page/markdown",
+            get(context_page_markdown),
+        )
+        .route("/contexts/{context_id}/page/links", get(context_page_links))
+        .route(
+            "/contexts/{context_id}/page/headings",
+            get(context_page_headings),
+        )
+        .route("/contexts/{context_id}/page/find", post(context_page_find))
+        .route(
+            "/contexts/{context_id}/page/open-link",
+            post(context_page_open_link),
+        )
         .route("/contexts/{context_id}/dom", get(context_snapshot_dom))
         .route("/contexts/{context_id}/events", get(context_events))
         .route("/contexts/{context_id}/downloads", get(context_downloads))
@@ -1505,8 +1836,16 @@ pub fn router(state: ServeRootState) -> Router {
         .route("/session", post(inject_session).get(snapshot_session))
         .route("/session/save", post(save_session_profile))
         .route("/session/load", post(load_session_profile))
+        .route("/search", post(search))
         .route("/navigate", post(navigate))
         .route("/execute", post(execute))
+        .route("/page", get(page_research))
+        .route("/page/text", get(page_text))
+        .route("/page/markdown", get(page_markdown))
+        .route("/page/links", get(page_links))
+        .route("/page/headings", get(page_headings))
+        .route("/page/find", post(page_find))
+        .route("/page/open-link", post(page_open_link))
         .route("/dom", get(snapshot_dom))
         .route("/events", get(events))
         .route("/downloads", get(downloads))
@@ -1629,6 +1968,8 @@ struct ApiParameterDoc {
 struct ApiRequestBodyDoc {
     content_type: &'static str,
     schema: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    example: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1967,10 +2308,32 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                     "Named browser context id",
                 )],
                 query: vec![],
-                request_body: Some(json_request("NavigateBody")),
+                request_body: Some(json_request_with_example(
+                    "NavigateBody",
+                    navigate_body_example(),
+                )),
                 responses: vec![
                     json_response(200, "Emitted navigation events", "SequencedEvent[]"),
                     json_response(400, "Invalid navigation request", "ApiErrorBody"),
+                ],
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/{context_id}/search",
+                summary: "Run a first-class web search in one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: Some(json_request_with_example(
+                    "SearchBody",
+                    search_body_example(),
+                )),
+                responses: vec![
+                    json_response(200, "Search navigation metadata and events", "SearchResponse"),
+                    json_response(400, "Invalid search request", "ApiErrorBody"),
                 ],
             },
             ApiRouteDoc {
@@ -1983,11 +2346,125 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                     "Named browser context id",
                 )],
                 query: vec![],
-                request_body: Some(json_request("ExecuteBody")),
+                request_body: Some(json_request_with_example(
+                    "ExecuteBody",
+                    execute_body_example(),
+                )),
                 responses: vec![
                     json_response(200, "Execution report", "ExecutionReport"),
                     json_response(400, "Invalid command batch", "ApiErrorBody"),
                     json_response(502, "Runtime command execution failed", "ApiErrorBody"),
+                ],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/{context_id}/page",
+                summary: "Read a structured page research snapshot for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "Page research snapshot", "PageResearchData")],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/{context_id}/page/text",
+                summary: "Read visible page text for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "Page text snapshot", "PageTextResponse")],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/{context_id}/page/markdown",
+                summary: "Read a markdown projection of the current page for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Page markdown projection",
+                    "PageMarkdownResponse",
+                )],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/{context_id}/page/links",
+                summary: "List page links for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "Page link inventory", "PageLinksResponse")],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/{context_id}/page/headings",
+                summary: "List page headings for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Page heading inventory",
+                    "PageHeadingsResponse",
+                )],
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/{context_id}/page/find",
+                summary: "Find text, headings, or links on the current page for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: Some(json_request_with_example(
+                    "PageFindBody",
+                    page_find_body_example(),
+                )),
+                responses: vec![
+                    json_response(200, "Page find results", "PageFindResponse"),
+                    json_response(400, "Invalid page-find request", "ApiErrorBody"),
+                ],
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/{context_id}/page/open-link",
+                summary: "Open a page link by text match for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: Some(json_request_with_example(
+                    "PageOpenLinkBody",
+                    page_open_link_body_example(),
+                )),
+                responses: vec![
+                    json_response(200, "Chosen link navigation result", "PageOpenLinkResponse"),
+                    json_response(400, "Invalid or ambiguous link-open request", "ApiErrorBody"),
                 ],
             },
             ApiRouteDoc {
@@ -2065,7 +2542,10 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                     "Named browser context id",
                 )],
                 query: vec![],
-                request_body: Some(json_request("TraceBody")),
+                request_body: Some(json_request_with_example(
+                    "TraceBody",
+                    trace_body_example(),
+                )),
                 responses: vec![
                     empty_response(204, "Trace recording enabled"),
                     json_response(400, "Invalid trace path request", "ApiErrorBody"),
@@ -2169,10 +2649,28 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 summary: "Navigate the active browser page",
                 params: vec![],
                 query: vec![],
-                request_body: Some(json_request("NavigateBody")),
+                request_body: Some(json_request_with_example(
+                    "NavigateBody",
+                    navigate_body_example(),
+                )),
                 responses: vec![
                     json_response(200, "Emitted navigation events", "SequencedEvent[]"),
                     json_response(400, "Invalid navigation request", "ApiErrorBody"),
+                ],
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/search",
+                summary: "Run a first-class web search in the active browser",
+                params: vec![],
+                query: vec![],
+                request_body: Some(json_request_with_example(
+                    "SearchBody",
+                    search_body_example(),
+                )),
+                responses: vec![
+                    json_response(200, "Search navigation metadata and events", "SearchResponse"),
+                    json_response(400, "Invalid search request", "ApiErrorBody"),
                 ],
             },
             ApiRouteDoc {
@@ -2181,11 +2679,97 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 summary: "Execute a command batch including file upload and media diagnostics",
                 params: vec![],
                 query: vec![],
-                request_body: Some(json_request("ExecuteBody")),
+                request_body: Some(json_request_with_example(
+                    "ExecuteBody",
+                    execute_body_example(),
+                )),
                 responses: vec![
                     json_response(200, "Execution report", "ExecutionReport"),
                     json_response(400, "Invalid command batch", "ApiErrorBody"),
                     json_response(502, "Runtime command execution failed", "ApiErrorBody"),
+                ],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/page",
+                summary: "Read a structured page research snapshot",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "Page research snapshot", "PageResearchData")],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/page/text",
+                summary: "Read visible page text",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "Page text snapshot", "PageTextResponse")],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/page/markdown",
+                summary: "Read a markdown projection of the current page",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Page markdown projection",
+                    "PageMarkdownResponse",
+                )],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/page/links",
+                summary: "List page links",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "Page link inventory", "PageLinksResponse")],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/page/headings",
+                summary: "List page headings",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Page heading inventory",
+                    "PageHeadingsResponse",
+                )],
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/page/find",
+                summary: "Find text, headings, or links on the current page",
+                params: vec![],
+                query: vec![],
+                request_body: Some(json_request_with_example(
+                    "PageFindBody",
+                    page_find_body_example(),
+                )),
+                responses: vec![
+                    json_response(200, "Page find results", "PageFindResponse"),
+                    json_response(400, "Invalid page-find request", "ApiErrorBody"),
+                ],
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/page/open-link",
+                summary: "Open a page link by text match",
+                params: vec![],
+                query: vec![],
+                request_body: Some(json_request_with_example(
+                    "PageOpenLinkBody",
+                    page_open_link_body_example(),
+                )),
+                responses: vec![
+                    json_response(200, "Chosen link navigation result", "PageOpenLinkResponse"),
+                    json_response(400, "Invalid or ambiguous link-open request", "ApiErrorBody"),
                 ],
             },
             ApiRouteDoc {
@@ -2294,7 +2878,10 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 summary: "Enable trace recording",
                 params: vec![],
                 query: vec![],
-                request_body: Some(json_request("TraceBody")),
+                request_body: Some(json_request_with_example(
+                    "TraceBody",
+                    trace_body_example(),
+                )),
                 responses: vec![
                     empty_response(204, "Trace recording enabled"),
                     json_response(400, "Invalid trace path request", "ApiErrorBody"),
@@ -2310,6 +2897,7 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
             "media_diagnostics",
             "embedded_audio_playback",
             "named_multi_context_control_plane",
+            "research_workflow_primitives",
             "session_snapshotting",
             "trace_recording",
         ],
@@ -2418,6 +3006,18 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 runtime_validated,
                 validated_by: "/contexts + /contexts/{context_id}/readyz",
                 details: "Named contexts are available when the default runtime is healthy.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "research_workflow_primitives",
+                supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
+                runtime_validated,
+                validated_by: "/search + /page/text + /page/find + /page/links + /page/open-link",
+                details: "First-class search, page text extraction, page find, and link opening are exposed without requiring direct /execute usage.",
             },
             ApiCapabilityStatusDoc {
                 name: "session_snapshotting",
@@ -2562,6 +3162,72 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 }],
             },
             ApiNamedSchemaDoc {
+                name: "SearchBody",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "query",
+                        kind: "string",
+                        required: true,
+                        description: "Search query text to submit through the active browser",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "engine",
+                        kind: "string",
+                        required: false,
+                        description: "Optional search engine name such as duckduckgo, google, or bing",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageFindBody",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "text",
+                        kind: "string",
+                        required: true,
+                        description: "Query text to find in visible page text, headings, or links",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "exact",
+                        kind: "bool",
+                        required: false,
+                        description: "Require exact field equality for headings and links",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageOpenLinkBody",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "text",
+                        kind: "string",
+                        required: true,
+                        description: "Link text to match against the current page",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "exact",
+                        kind: "bool",
+                        required: false,
+                        description: "Require exact normalized link-text equality",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "href_contains",
+                        kind: "string",
+                        required: false,
+                        description: "Optional href substring filter applied before disambiguation",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "index",
+                        kind: "usize",
+                        required: false,
+                        description: "Optional zero-based candidate index when multiple links match",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
                 name: "CreateContextBody",
                 kind: "object",
                 fields: vec![
@@ -2617,6 +3283,138 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                     kind: "path",
                     required: true,
                     description: "Destination trace file path on the local machine",
+                }],
+            },
+            ApiNamedSchemaDoc {
+                name: "SearchResponse",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "engine",
+                        kind: "string",
+                        required: true,
+                        description: "Resolved search engine used for navigation",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "query",
+                        kind: "string",
+                        required: true,
+                        description: "Original caller-provided search query",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "url",
+                        kind: "string",
+                        required: true,
+                        description: "Final search URL loaded into the browser",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "events",
+                        kind: "SequencedEvent[]",
+                        required: true,
+                        description: "Navigation events emitted by the search navigation",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageResearchData",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "title",
+                        kind: "string|null",
+                        required: true,
+                        description: "Current document title",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "url",
+                        kind: "string|null",
+                        required: true,
+                        description: "Current page URL",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "canonical_url",
+                        kind: "string|null",
+                        required: true,
+                        description: "Canonical link target when present",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "visible_text",
+                        kind: "string",
+                        required: true,
+                        description: "Normalized visible page text for research workflows",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "headings",
+                        kind: "PageResearchHeading[]",
+                        required: true,
+                        description: "Heading inventory extracted from the current page",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "links",
+                        kind: "PageResearchLink[]",
+                        required: true,
+                        description: "Link inventory extracted from the current page",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageTextResponse",
+                kind: "object",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "text",
+                    kind: "string",
+                    required: true,
+                    description: "Normalized visible page text",
+                }],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageMarkdownResponse",
+                kind: "object",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "markdown",
+                    kind: "string",
+                    required: true,
+                    description: "Markdown projection of the current page research snapshot",
+                }],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageLinksResponse",
+                kind: "object",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "links",
+                    kind: "PageResearchLink[]",
+                    required: true,
+                    description: "Page links captured from the current page",
+                }],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageHeadingsResponse",
+                kind: "object",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "headings",
+                    kind: "PageResearchHeading[]",
+                    required: true,
+                    description: "Page headings captured from the current page",
+                }],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageFindResponse",
+                kind: "object",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "matches",
+                    kind: "PageFindMatch[]",
+                    required: true,
+                    description: "Matched headings, links, or text snippets",
+                }],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageOpenLinkResponse",
+                kind: "object",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "chosen",
+                    kind: "PageResearchLink",
+                    required: true,
+                    description: "Chosen link opened by the route",
                 }],
             },
             ApiNamedSchemaDoc {
@@ -3009,10 +3807,97 @@ async fn snapshot_session(
     ))
 }
 
+async fn snapshot_page_research(state: &ApiState) -> Result<PageResearchData, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::PageResearch(reply_tx))
+        .map_err(channel_error)?;
+    Ok(await_command("page_research", state, reply_rx).await??)
+}
+
+async fn open_matching_link(
+    state: &ApiState,
+    body: PageOpenLinkBody,
+) -> Result<Json<PageOpenLinkResponse>, ApiError> {
+    let page = snapshot_page_research(state).await?;
+    let candidates = matching_links(&page, &body.text, body.exact, body.href_contains.as_deref());
+    if candidates.is_empty() {
+        return Err(ApiError::bad_request(
+            "link_not_found",
+            format!("no link matched `{}` on the current page", body.text),
+            Some(String::from(
+                "call `GET /page/links` or `POST /page/find` first, then retry with a more specific link label",
+            )),
+        ));
+    }
+    let chosen = if let Some(index) = body.index {
+        candidates.get(index).cloned().ok_or_else(|| {
+            ApiError::bad_request(
+                "link_index_out_of_range",
+                format!(
+                    "link candidate index {index} is out of range for {} matches",
+                    candidates.len()
+                ),
+                Some(String::from(
+                    "use `GET /page/links` to inspect candidate ordering before retrying",
+                )),
+            )
+        })?
+    } else if candidates.len() == 1 {
+        candidates[0].clone()
+    } else {
+        return Err(ApiError::bad_request(
+            "ambiguous_link_match",
+            format!(
+                "link text `{}` matched {} links; provide `index` or a narrower `href_contains` filter",
+                body.text,
+                candidates.len()
+            ),
+            Some(String::from(
+                "call `GET /page/links` to inspect candidates, then retry with `index`, `exact`, or `href_contains`",
+            )),
+        ));
+    };
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::Navigate(chosen.href.clone(), reply_tx))
+        .map_err(channel_error)?;
+    let events = await_command("page_open_link", state, reply_rx).await??;
+    Ok(Json(PageOpenLinkResponse {
+        text: body.text,
+        exact: body.exact,
+        href_contains: body.href_contains,
+        candidate_count: candidates.len(),
+        chosen,
+        events,
+    }))
+}
+
+fn invalid_json_request(
+    operation: &str,
+    example: serde_json::Value,
+    rejection: JsonRejection,
+) -> ApiError {
+    let example_json =
+        serde_json::to_string_pretty(&example).unwrap_or_else(|_| example.to_string());
+    ApiError::bad_request(
+        "invalid_json_body",
+        format!("invalid JSON body for `{operation}`: {}", rejection.body_text()),
+        Some(format!(
+            "send `content-type: application/json` with a body like:\n{example_json}"
+        )),
+    )
+}
+
 async fn navigate(
     State(root): State<ServeRootState>,
-    Json(body): Json<NavigateBody>,
+    body: Result<Json<NavigateBody>, JsonRejection>,
 ) -> Result<Json<Vec<SequencedEvent>>, ApiError> {
+    let Json(body) = body.map_err(|rejection| {
+        invalid_json_request("navigate", navigate_body_example(), rejection)
+    })?;
     let state = require_default_context_state(&root)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     state
@@ -3022,10 +3907,44 @@ async fn navigate(
     Ok(Json(await_command("navigate", &state, reply_rx).await??))
 }
 
+async fn search(
+    State(root): State<ServeRootState>,
+    body: Result<Json<SearchBody>, JsonRejection>,
+) -> Result<Json<SearchResponse>, ApiError> {
+    let Json(body) =
+        body.map_err(|rejection| invalid_json_request("search", search_body_example(), rejection))?;
+    let state = require_default_context_state(&root)?;
+    let query = body.query.trim().to_string();
+    if query.is_empty() {
+        return Err(ApiError::bad_request(
+            "invalid_search_query",
+            String::from("search query must not be empty"),
+            Some(String::from("send a non-empty `query` string")),
+        ));
+    }
+    let url = build_search_url(&query, body.engine.as_deref());
+    let engine = search_engine_name(body.engine.as_deref()).to_string();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::Navigate(url.clone(), reply_tx))
+        .map_err(channel_error)?;
+    let events = await_command("search", &state, reply_rx).await??;
+    Ok(Json(SearchResponse {
+        engine,
+        query,
+        url,
+        events,
+    }))
+}
+
 async fn execute(
     State(root): State<ServeRootState>,
-    Json(body): Json<ExecuteBody>,
+    body: Result<Json<ExecuteBody>, JsonRejection>,
 ) -> Result<Json<ExecutionReport>, ApiError> {
+    let Json(body) = body.map_err(|rejection| {
+        invalid_json_request("execute", execute_body_example(), rejection)
+    })?;
     let state = require_default_context_state(&root)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     state
@@ -3033,6 +3952,108 @@ async fn execute(
         .send(ApiCommand::Execute(body.commands, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(await_command("execute", &state, reply_rx).await??))
+}
+
+async fn page_research(
+    State(root): State<ServeRootState>,
+) -> Result<Json<PageResearchData>, ApiError> {
+    let state = require_default_context_state(&root)?;
+    Ok(Json(snapshot_page_research(&state).await?))
+}
+
+async fn page_text(
+    State(root): State<ServeRootState>,
+) -> Result<Json<PageTextResponse>, ApiError> {
+    let state = require_default_context_state(&root)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(PageTextResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        text: page.visible_text.clone(),
+        likely_not_found: page.likely_not_found,
+        not_found_signals: page.not_found_signals.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn page_markdown(
+    State(root): State<ServeRootState>,
+) -> Result<Json<PageMarkdownResponse>, ApiError> {
+    let state = require_default_context_state(&root)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(PageMarkdownResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        markdown: render_page_markdown(&page),
+        likely_not_found: page.likely_not_found,
+        not_found_signals: page.not_found_signals.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn page_links(
+    State(root): State<ServeRootState>,
+) -> Result<Json<PageLinksResponse>, ApiError> {
+    let state = require_default_context_state(&root)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(PageLinksResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        links: page.links.clone(),
+        likely_not_found: page.likely_not_found,
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn page_headings(
+    State(root): State<ServeRootState>,
+) -> Result<Json<PageHeadingsResponse>, ApiError> {
+    let state = require_default_context_state(&root)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(PageHeadingsResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        headings: page.headings.clone(),
+        likely_not_found: page.likely_not_found,
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn page_find(
+    State(root): State<ServeRootState>,
+    body: Result<Json<PageFindBody>, JsonRejection>,
+) -> Result<Json<PageFindResponse>, ApiError> {
+    let Json(body) =
+        body.map_err(|rejection| invalid_json_request("page_find", page_find_body_example(), rejection))?;
+    let state = require_default_context_state(&root)?;
+    let page = snapshot_page_research(&state).await?;
+    let matches = page_find_matches(&page, &body.text, body.exact);
+    Ok(Json(PageFindResponse {
+        query: body.text,
+        exact: body.exact,
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        match_count: matches.len(),
+        matches,
+        likely_not_found: page.likely_not_found,
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn page_open_link(
+    State(root): State<ServeRootState>,
+    body: Result<Json<PageOpenLinkBody>, JsonRejection>,
+) -> Result<Json<PageOpenLinkResponse>, ApiError> {
+    let Json(body) = body.map_err(|rejection| {
+        invalid_json_request("page_open_link", page_open_link_body_example(), rejection)
+    })?;
+    let state = require_default_context_state(&root)?;
+    open_matching_link(&state, body).await
 }
 
 async fn snapshot_dom(State(root): State<ServeRootState>) -> Result<Json<DomSnapshot>, ApiError> {
@@ -3274,8 +4295,11 @@ async fn context_snapshot_session(
 async fn context_navigate(
     State(root): State<ServeRootState>,
     Path(context_id): Path<String>,
-    Json(body): Json<NavigateBody>,
+    body: Result<Json<NavigateBody>, JsonRejection>,
 ) -> Result<Json<Vec<SequencedEvent>>, ApiError> {
+    let Json(body) = body.map_err(|rejection| {
+        invalid_json_request("navigate", navigate_body_example(), rejection)
+    })?;
     let state = require_context_state(&root, &context_id)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     state
@@ -3285,11 +4309,46 @@ async fn context_navigate(
     Ok(Json(await_command("navigate", &state, reply_rx).await??))
 }
 
+async fn context_search(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+    body: Result<Json<SearchBody>, JsonRejection>,
+) -> Result<Json<SearchResponse>, ApiError> {
+    let Json(body) =
+        body.map_err(|rejection| invalid_json_request("search", search_body_example(), rejection))?;
+    let state = require_context_state(&root, &context_id)?;
+    let query = body.query.trim().to_string();
+    if query.is_empty() {
+        return Err(ApiError::bad_request(
+            "invalid_search_query",
+            String::from("search query must not be empty"),
+            Some(String::from("send a non-empty `query` string")),
+        ));
+    }
+    let url = build_search_url(&query, body.engine.as_deref());
+    let engine = search_engine_name(body.engine.as_deref()).to_string();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::Navigate(url.clone(), reply_tx))
+        .map_err(channel_error)?;
+    let events = await_command("search", &state, reply_rx).await??;
+    Ok(Json(SearchResponse {
+        engine,
+        query,
+        url,
+        events,
+    }))
+}
+
 async fn context_execute(
     State(root): State<ServeRootState>,
     Path(context_id): Path<String>,
-    Json(body): Json<ExecuteBody>,
+    body: Result<Json<ExecuteBody>, JsonRejection>,
 ) -> Result<Json<ExecutionReport>, ApiError> {
+    let Json(body) = body.map_err(|rejection| {
+        invalid_json_request("execute", execute_body_example(), rejection)
+    })?;
     let state = require_context_state(&root, &context_id)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     state
@@ -3297,6 +4356,115 @@ async fn context_execute(
         .send(ApiCommand::Execute(body.commands, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(await_command("execute", &state, reply_rx).await??))
+}
+
+async fn context_page_research(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+) -> Result<Json<PageResearchData>, ApiError> {
+    let state = require_context_state(&root, &context_id)?;
+    Ok(Json(snapshot_page_research(&state).await?))
+}
+
+async fn context_page_text(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+) -> Result<Json<PageTextResponse>, ApiError> {
+    let state = require_context_state(&root, &context_id)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(PageTextResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        text: page.visible_text.clone(),
+        likely_not_found: page.likely_not_found,
+        not_found_signals: page.not_found_signals.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn context_page_markdown(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+) -> Result<Json<PageMarkdownResponse>, ApiError> {
+    let state = require_context_state(&root, &context_id)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(PageMarkdownResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        markdown: render_page_markdown(&page),
+        likely_not_found: page.likely_not_found,
+        not_found_signals: page.not_found_signals.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn context_page_links(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+) -> Result<Json<PageLinksResponse>, ApiError> {
+    let state = require_context_state(&root, &context_id)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(PageLinksResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        links: page.links.clone(),
+        likely_not_found: page.likely_not_found,
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn context_page_headings(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+) -> Result<Json<PageHeadingsResponse>, ApiError> {
+    let state = require_context_state(&root, &context_id)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(PageHeadingsResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        headings: page.headings.clone(),
+        likely_not_found: page.likely_not_found,
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn context_page_find(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+    body: Result<Json<PageFindBody>, JsonRejection>,
+) -> Result<Json<PageFindResponse>, ApiError> {
+    let Json(body) =
+        body.map_err(|rejection| invalid_json_request("page_find", page_find_body_example(), rejection))?;
+    let state = require_context_state(&root, &context_id)?;
+    let page = snapshot_page_research(&state).await?;
+    let matches = page_find_matches(&page, &body.text, body.exact);
+    Ok(Json(PageFindResponse {
+        query: body.text,
+        exact: body.exact,
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        match_count: matches.len(),
+        matches,
+        likely_not_found: page.likely_not_found,
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn context_page_open_link(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+    body: Result<Json<PageOpenLinkBody>, JsonRejection>,
+) -> Result<Json<PageOpenLinkResponse>, ApiError> {
+    let Json(body) = body.map_err(|rejection| {
+        invalid_json_request("page_open_link", page_open_link_body_example(), rejection)
+    })?;
+    let state = require_context_state(&root, &context_id)?;
+    open_matching_link(&state, body).await
 }
 
 async fn context_snapshot_dom(
@@ -3981,6 +5149,18 @@ fn json_request(schema: &'static str) -> ApiRequestBodyDoc {
     ApiRequestBodyDoc {
         content_type: "application/json",
         schema,
+        example: None,
+    }
+}
+
+fn json_request_with_example(
+    schema: &'static str,
+    example: serde_json::Value,
+) -> ApiRequestBodyDoc {
+    ApiRequestBodyDoc {
+        content_type: "application/json",
+        schema,
+        example: Some(example),
     }
 }
 
@@ -3998,6 +5178,50 @@ fn empty_response(status: u16, description: &'static str) -> ApiResponseDoc {
         description,
         schema: "empty",
     }
+}
+
+fn navigate_body_example() -> serde_json::Value {
+    json!({
+        "url": "https://example.com"
+    })
+}
+
+fn execute_body_example() -> serde_json::Value {
+    json!({
+        "commands": [
+            {
+                "type": "eval",
+                "code": "document.title"
+            }
+        ]
+    })
+}
+
+fn search_body_example() -> serde_json::Value {
+    json!({
+        "query": "shopify app review",
+        "engine": "duckduckgo"
+    })
+}
+
+fn page_find_body_example() -> serde_json::Value {
+    json!({
+        "text": "Submit an app version for review",
+        "exact": false
+    })
+}
+
+fn page_open_link_body_example() -> serde_json::Value {
+    json!({
+        "text": "Release an app version",
+        "exact": false
+    })
+}
+
+fn trace_body_example() -> serde_json::Value {
+    json!({
+        "path": "traces/run.json"
+    })
 }
 
 fn sse_response(status: u16, description: &'static str) -> ApiResponseDoc {
@@ -4467,6 +5691,60 @@ mod tests {
                 .iter()
                 .any(|field| field.name == "request_id")
         );
+        let execute_route = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/execute")
+            .expect("execute route should exist");
+        assert!(
+            execute_route
+                .request_body
+                .as_ref()
+                .and_then(|body| body.example.as_ref())
+                .is_some()
+        );
+        assert!(manifest.capabilities.contains(&"research_workflow_primitives"));
+        assert!(
+            manifest
+                .routes
+                .iter()
+                .any(|route| route.path == "/page/text" && route.method == "GET")
+        );
+    }
+
+    #[test]
+    fn search_url_defaults_to_duckduckgo() {
+        assert_eq!(
+            build_search_url("shopify app review", None),
+            "https://duckduckgo.com/?q=shopify+app+review"
+        );
+    }
+
+    #[test]
+    fn page_find_matches_links_and_visible_text() {
+        let page = PageResearchData {
+            title: Some("Docs".into()),
+            url: Some("https://example.com/docs".into()),
+            canonical_url: None,
+            visible_text: "Submit an app version for review from the releases page.".into(),
+            headings: vec![PageResearchHeading {
+                level: Some(2),
+                text: "Release an app version".into(),
+                id: None,
+            }],
+            links: vec![PageResearchLink {
+                index: 0,
+                text: "Release an app version".into(),
+                href: "https://example.com/releases".into(),
+                title: None,
+            }],
+            likely_not_found: false,
+            not_found_signals: Vec::new(),
+            suggested_search_query: None,
+        };
+        let matches = page_find_matches(&page, "release an app version", false);
+        assert!(matches.iter().any(|entry| entry.kind == "heading"));
+        assert!(matches.iter().any(|entry| entry.kind == "link"));
     }
 
     #[test]

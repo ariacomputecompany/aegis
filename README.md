@@ -80,6 +80,9 @@ Top-level commands:
 - `serve`
 - `usage`
 - `examples`
+- `navigate`
+- `search`
+- `page inspect|text|markdown|headings|links|find|open-link`
 - `config get`
 - `config set`
 - `config secrets-get`
@@ -102,6 +105,7 @@ Global runtime flags:
 - `--start-url <url>`
 - `--host-lib <path>` overrides the resolved native host library; `serve` defaults to the workspace release runtime and refreshes it when sources are newer
 - `--profile <name>`
+- `--server-addr <host:port>` targets an already-running `aegis serve` process for CLI research commands
 
 Built-in CLI guidance:
 
@@ -189,6 +193,17 @@ For unattended execution:
 If `--start-url` is omitted, Aegis starts on the local bootstrap page and only pays network cost
 when the agent explicitly navigates.
 
+Research through a running runtime:
+
+```bash
+aegis --server-addr 127.0.0.1:7878 search shopify app review
+aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
+aegis --server-addr 127.0.0.1:7878 page text
+aegis --server-addr 127.0.0.1:7878 page find release an app version
+aegis --server-addr 127.0.0.1:7878 page links
+aegis --server-addr 127.0.0.1:7878 page open-link release an app version
+```
+
 ## HTTP API
 
 Base address defaults to `http://127.0.0.1:7878`.
@@ -206,7 +221,15 @@ Core routes:
 - `GET /contexts/:context_id/readyz`
 - `GET /contexts/:context_id/runtime`
 - `POST /contexts/:context_id/navigate`
+- `POST /contexts/:context_id/search`
 - `POST /contexts/:context_id/execute`
+- `GET /contexts/:context_id/page`
+- `GET /contexts/:context_id/page/text`
+- `GET /contexts/:context_id/page/markdown`
+- `GET /contexts/:context_id/page/links`
+- `GET /contexts/:context_id/page/headings`
+- `POST /contexts/:context_id/page/find`
+- `POST /contexts/:context_id/page/open-link`
 - `GET /contexts/:context_id/dom`
 - `GET /contexts/:context_id/events`
 - `GET /contexts/:context_id/events/live`
@@ -217,7 +240,15 @@ Core routes:
 - `GET /readyz`
 - `GET /runtime`
 - `POST /navigate`
+- `POST /search`
 - `POST /execute`
+- `GET /page`
+- `GET /page/text`
+- `GET /page/markdown`
+- `GET /page/links`
+- `GET /page/headings`
+- `POST /page/find`
+- `POST /page/open-link`
 - `GET /dom`
 - `GET /events`
 - `GET /events/live`
@@ -230,8 +261,9 @@ server does not merely mean the control plane is bound; it means the active page
 verified automation-ready state. `/healthz` and `/readyz` stay false until the browser,
 renderer context, and live runtime API are all usable.
 
-`GET /` and `GET /manifest` expose a stable JSON discovery surface with the route list and
-supported command types so agents do not need to guess the control plane.
+`GET /` and `GET /manifest` expose a stable JSON discovery surface with the route list,
+supported command types, named schemas, and concrete JSON request examples so agents do not
+need to guess the control plane.
 
 Named contexts let one server own multiple isolated browser runtimes at once. The legacy root
 routes still target the default context, while `/contexts/:context_id/...` gives explicit control
@@ -272,7 +304,7 @@ Readiness contract:
 - `/healthz` and `/readyz` are only healthy when the control plane is up and the runtime is operational
 - an operational runtime requires `bootstrapped = true`, `browser.browser_available = true`, `browser.renderer_ready = true`, and `browser.runtime_ready = true`
 - `renderer_ready` means the main-frame renderer context exists
-- `runtime_ready` means Aegis verified the live `window.__aegis` automation API and can actually dispatch work
+- `runtime_ready` means Aegis verified the live `window.__aegis` automation API, including the page research helpers, and can actually dispatch work
 
 ### `POST /navigate`
 
@@ -282,6 +314,16 @@ Navigate the live browser session:
 curl -X POST http://127.0.0.1:7878/navigate \
   -H 'content-type: application/json' \
   -d '{"url":"https://example.com"}'
+```
+
+### `POST /search`
+
+Run a first-class web search without hand-building a search-engine URL:
+
+```bash
+curl -X POST http://127.0.0.1:7878/search \
+  -H 'content-type: application/json' \
+  -d '{"query":"shopify app review","engine":"duckduckgo"}'
 ```
 
 ### `POST /execute`
@@ -329,6 +371,70 @@ Execution model:
 - `wait_for` executes inside the runtime owner loop, polling live page metadata, selectors, scroll position/change, media readiness, and optional DOM conditions until the condition is satisfied or times out
 - `execute` can omit the snapshot for low-latency commands like `eval` and `scroll`
 - incremental state flows through `GET /events`
+
+### `GET /page`
+
+Return a purpose-built research snapshot for the current page:
+
+```bash
+curl http://127.0.0.1:7878/page
+```
+
+The page snapshot includes:
+
+- `title`
+- `url`
+- `canonical_url`
+- `visible_text`
+- `headings`
+- `links`
+- `likely_not_found`
+- `not_found_signals`
+- `suggested_search_query`
+
+### `GET /page/text`
+
+Return normalized visible page text:
+
+```bash
+curl http://127.0.0.1:7878/page/text
+```
+
+### `GET /page/markdown`
+
+Return a markdown projection of the current page:
+
+```bash
+curl http://127.0.0.1:7878/page/markdown
+```
+
+### `GET /page/links`
+
+Return page links with resolved hrefs:
+
+```bash
+curl http://127.0.0.1:7878/page/links
+```
+
+### `POST /page/find`
+
+Find text, headings, or links on the current page:
+
+```bash
+curl -X POST http://127.0.0.1:7878/page/find \
+  -H 'content-type: application/json' \
+  -d '{"text":"Submit an app version for review","exact":false}'
+```
+
+### `POST /page/open-link`
+
+Open a link by text match instead of manually reconstructing a navigation target:
+
+```bash
+curl -X POST http://127.0.0.1:7878/page/open-link \
+  -H 'content-type: application/json' \
+  -d '{"text":"Release an app version","exact":false}'
+```
 
 Example drag and geometry batch:
 

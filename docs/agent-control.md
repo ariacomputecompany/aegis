@@ -43,6 +43,7 @@ Global flags:
 - `--start-url <url>`
 - `--host-lib <path>` overrides the resolved native host library; `serve` defaults to the workspace release runtime and refreshes it when sources are newer
 - `--profile <name>`
+- `--server-addr <host:port>` targets an already-running `aegis serve` process for CLI research commands
 
 Production state model:
 
@@ -142,6 +143,19 @@ Start the API server:
 aegis --mode headful serve --addr 127.0.0.1:7878
 ```
 
+Research through a running runtime:
+
+```bash
+aegis --server-addr 127.0.0.1:7878 search shopify app review
+aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
+aegis --server-addr 127.0.0.1:7878 page inspect
+aegis --server-addr 127.0.0.1:7878 page text
+aegis --server-addr 127.0.0.1:7878 page markdown
+aegis --server-addr 127.0.0.1:7878 page find redirect to your app's ui
+aegis --server-addr 127.0.0.1:7878 page links
+aegis --server-addr 127.0.0.1:7878 page open-link release an app version
+```
+
 Measure cold-start and first-command latency:
 
 ```bash
@@ -238,8 +252,9 @@ curl http://127.0.0.1:7878/
 curl http://127.0.0.1:7878/manifest
 ```
 
-These endpoints return a stable JSON route manifest plus supported command types so agents can
-discover the control plane without probing for undocumented routes.
+These endpoints return a stable JSON route manifest plus supported command types, named schemas,
+and concrete JSON request examples so agents can discover the control plane without probing for
+undocumented routes.
 
 The manifest now also advertises named multi-context routes. Root routes target the default
 context, while `/contexts/:context_id/...` routes provide explicit isolation for multi-user and
@@ -280,7 +295,8 @@ Concretely, readiness requires:
 - `runtime.host.runtime_ready = true`
 
 `renderer_ready` means the main-frame renderer context exists. `runtime_ready` is stricter: it
-means Aegis has verified the live `window.__aegis` automation API and can dispatch real DOM and
+means Aegis has verified the live `window.__aegis` automation API, including the page research
+helpers, and can dispatch real DOM and
 command work through it.
 
 ### Runtime Info
@@ -338,6 +354,14 @@ curl -X POST http://127.0.0.1:7878/session/load
 curl -X POST http://127.0.0.1:7878/navigate \
   -H 'content-type: application/json' \
   -d '{"url":"https://example.com"}'
+```
+
+### Search
+
+```bash
+curl -X POST http://127.0.0.1:7878/search \
+  -H 'content-type: application/json' \
+  -d '{"query":"shopify app review","engine":"duckduckgo"}'
 ```
 
 ### Execute
@@ -466,6 +490,40 @@ Notes:
 - `execute` may return `"snapshot": null` for low-latency commands such as `eval` and `scroll`
 - agents should treat the event stream as the incremental source of truth between full snapshots
 - the most reliable loop on live sites is `navigate -> /dom -> execute(match...)`
+
+### Page Snapshot
+
+```bash
+curl http://127.0.0.1:7878/page
+curl http://127.0.0.1:7878/page/text
+curl http://127.0.0.1:7878/page/markdown
+curl http://127.0.0.1:7878/page/links
+curl http://127.0.0.1:7878/page/headings
+```
+
+The page research routes are the first-class alternative to dumping `/dom` when you need:
+
+- normalized visible page text
+- headings
+- links
+- canonical URL
+- likely-404 diagnostics and a suggested recovery search query
+
+### Find On Page
+
+```bash
+curl -X POST http://127.0.0.1:7878/page/find \
+  -H 'content-type: application/json' \
+  -d '{"text":"Submit an app version for review","exact":false}'
+```
+
+### Open Link By Text
+
+```bash
+curl -X POST http://127.0.0.1:7878/page/open-link \
+  -H 'content-type: application/json' \
+  -d '{"text":"Release an app version","exact":false}'
+```
 
 ### Snapshot DOM
 

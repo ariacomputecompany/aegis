@@ -1294,6 +1294,74 @@
     };
   }
 
+  function pageResearchData() {
+    const title = document.title || null;
+    const url = window.location ? window.location.href : null;
+    const canonicalLink = document.querySelector("link[rel='canonical'][href]");
+    const canonicalUrl = canonicalLink ? canonicalLink.href : null;
+    const body = document.body;
+    const visibleText = normalizeText(body ? (body.innerText || body.textContent || "") : "");
+    const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+      .map((node) => ({
+        level: Number.parseInt(node.tagName.slice(1), 10) || null,
+        text: normalizeText(node.innerText || node.textContent || ""),
+        id: node.id || null
+      }))
+      .filter((heading) => heading.text);
+    const links = Array.from(document.querySelectorAll("a[href]"))
+      .map((node, index) => ({
+        index,
+        text: normalizeText(node.innerText || node.textContent || node.getAttribute("aria-label") || node.title || ""),
+        href: node.href,
+        title: node.title || null
+      }))
+      .filter((link) => link.href);
+
+    const combinedText = normalizeText(`${title || ""} ${visibleText}`);
+    const notFoundSignals = [];
+    const pushSignal = (signal) => {
+      if (!notFoundSignals.includes(signal)) {
+        notFoundSignals.push(signal);
+      }
+    };
+    if (combinedText.includes("404")) {
+      pushSignal("title_or_body_mentions_404");
+    }
+    if (combinedText.includes("page not found")) {
+      pushSignal("page_not_found_text");
+    }
+    if (combinedText.includes("not found")) {
+      pushSignal("not_found_text");
+    }
+    if (combinedText.includes("doesn't exist") || combinedText.includes("does not exist")) {
+      pushSignal("missing_page_text");
+    }
+    const likelyNotFound = notFoundSignals.length > 0;
+    const primaryHeading = headings[0] ? headings[0].text : null;
+    let suggestedSearchQuery = null;
+    if (likelyNotFound && url) {
+      try {
+        const host = new URL(url).hostname;
+        const topic = normalizeText(primaryHeading || title || "").trim();
+        suggestedSearchQuery = normalizeText(`site:${host} ${topic}`).trim() || `site:${host}`;
+      } catch (_error) {
+        suggestedSearchQuery = normalizeText(primaryHeading || title || "").trim() || null;
+      }
+    }
+
+    return {
+      title,
+      url,
+      canonical_url: canonicalUrl,
+      visible_text: visibleText,
+      headings,
+      links,
+      likely_not_found: likelyNotFound,
+      not_found_signals: notFoundSignals,
+      suggested_search_query: suggestedSearchQuery
+    };
+  }
+
   function scrollIntoViewIfNeeded(el) {
     if (typeof el.scrollIntoView === "function") {
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
@@ -2417,6 +2485,7 @@
     assignId,
     currentPageState,
     resolveTargetInfo,
-    waitState
+    waitState,
+    pageResearchData
   };
 })();
