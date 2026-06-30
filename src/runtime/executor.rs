@@ -172,15 +172,120 @@ pub struct PageResearchLink {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageContentScopes {
+    #[serde(default)]
+    pub main_text: String,
+    #[serde(default)]
+    pub article_text: String,
+    #[serde(default)]
+    pub controls_text: String,
+    #[serde(default)]
+    pub overlay_text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchControl {
+    pub index: usize,
+    pub kind: String,
+    pub role: Option<String>,
+    pub text: String,
+    pub label: Option<String>,
+    pub placeholder: Option<String>,
+    pub control_type: Option<String>,
+    pub href: Option<String>,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub in_main_content: bool,
+    #[serde(default)]
+    pub in_viewport: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchForm {
+    pub index: usize,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub action: Option<String>,
+    pub method: Option<String>,
+    #[serde(default)]
+    pub controls: Vec<PageResearchControl>,
+    #[serde(default)]
+    pub submit_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchOverlay {
+    pub index: usize,
+    pub kind: String,
+    pub text: String,
+    #[serde(default)]
+    pub blocking: bool,
+    #[serde(default)]
+    pub dismiss_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageSemanticSummary {
+    #[serde(default)]
+    pub link_count: usize,
+    #[serde(default)]
+    pub control_count: usize,
+    #[serde(default)]
+    pub form_count: usize,
+    #[serde(default)]
+    pub overlay_count: usize,
+    #[serde(default)]
+    pub dialog_count: usize,
+    #[serde(default)]
+    pub alert_count: usize,
+    #[serde(default)]
+    pub code_block_count: usize,
+    #[serde(default)]
+    pub table_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PageResearchData {
     pub title: Option<String>,
     pub url: Option<String>,
     pub canonical_url: Option<String>,
     pub visible_text: String,
     #[serde(default)]
+    pub content_scopes: PageContentScopes,
+    pub main_content_selector: Option<String>,
+    #[serde(default)]
     pub headings: Vec<PageResearchHeading>,
     #[serde(default)]
     pub links: Vec<PageResearchLink>,
+    #[serde(default)]
+    pub primary_links: Vec<PageResearchLink>,
+    #[serde(default)]
+    pub controls: Vec<PageResearchControl>,
+    #[serde(default)]
+    pub primary_controls: Vec<PageResearchControl>,
+    #[serde(default)]
+    pub forms: Vec<PageResearchForm>,
+    #[serde(default)]
+    pub overlays: Vec<PageResearchOverlay>,
+    #[serde(default)]
+    pub semantic_summary: PageSemanticSummary,
+    #[serde(default)]
+    pub page_type: String,
+    #[serde(default)]
+    pub useful_text_available: bool,
+    #[serde(default)]
+    pub interactive_elements_available: bool,
+    #[serde(default)]
+    pub auth_wall_likely: bool,
+    #[serde(default)]
+    pub blocked_by_overlay: bool,
+    #[serde(default)]
+    pub blocker_signals: Vec<String>,
+    #[serde(default)]
+    pub suggested_next_actions: Vec<String>,
     #[serde(default)]
     pub likely_not_found: bool,
     #[serde(default)]
@@ -655,7 +760,11 @@ impl AegisRuntime {
         let previous_global_sequence = emitted_events
             .first()
             .map(|event| event.sequence.saturating_sub(1))
-            .or_else(|| self.events.oldest_sequence().map(|_| self.events.latest_sequence()));
+            .or_else(|| {
+                self.events
+                    .oldest_sequence()
+                    .map(|_| self.events.latest_sequence())
+            });
 
         for (bridge_index, mut result) in response_results.into_iter().enumerate() {
             let command_index = prepared_positions[bridge_index];
@@ -1105,8 +1214,9 @@ impl AegisRuntime {
             "JSON.stringify(window.__aegis.resolveTargetInfo({target_json}, {action_json}))"
         );
         let raw = self.bridge.eval_js(&script)?;
-        serde_json::from_str(&raw)
-            .map_err(|error| AegisError::Bridge(format!("target resolution json parse error: {error}")))
+        serde_json::from_str(&raw).map_err(|error| {
+            AegisError::Bridge(format!("target resolution json parse error: {error}"))
+        })
     }
 }
 
@@ -1280,10 +1390,18 @@ fn command_events_for_span(
     command_count: usize,
 ) -> &[SequencedEvent] {
     let Some(span) = span else {
-        return if command_count == 1 { emitted_events } else { &[] };
+        return if command_count == 1 {
+            emitted_events
+        } else {
+            &[]
+        };
     };
     if span.start > span.end || span.end > emitted_events.len() {
-        return if command_count == 1 { emitted_events } else { &[] };
+        return if command_count == 1 {
+            emitted_events
+        } else {
+            &[]
+        };
     }
     &emitted_events[span.start..span.end]
 }

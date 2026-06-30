@@ -149,10 +149,11 @@ Research through a running runtime:
 aegis --server-addr 127.0.0.1:7878 search shopify app review
 aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
 aegis --server-addr 127.0.0.1:7878 page inspect
-aegis --server-addr 127.0.0.1:7878 page text
-aegis --server-addr 127.0.0.1:7878 page markdown
+aegis --server-addr 127.0.0.1:7878 page text --scope main
+aegis --server-addr 127.0.0.1:7878 page markdown --scope article
+aegis --server-addr 127.0.0.1:7878 page actions
+aegis --server-addr 127.0.0.1:7878 page forms
 aegis --server-addr 127.0.0.1:7878 page find redirect to your app's ui
-aegis --server-addr 127.0.0.1:7878 page links
 aegis --server-addr 127.0.0.1:7878 page open-link release an app version
 ```
 
@@ -496,7 +497,11 @@ Notes:
 ```bash
 curl http://127.0.0.1:7878/page
 curl http://127.0.0.1:7878/page/text
+curl 'http://127.0.0.1:7878/page/text?scope=main'
 curl http://127.0.0.1:7878/page/markdown
+curl 'http://127.0.0.1:7878/page/markdown?scope=article'
+curl http://127.0.0.1:7878/page/actions
+curl http://127.0.0.1:7878/page/forms
 curl http://127.0.0.1:7878/page/links
 curl http://127.0.0.1:7878/page/headings
 ```
@@ -504,8 +509,12 @@ curl http://127.0.0.1:7878/page/headings
 The page research routes are the first-class alternative to dumping `/dom` when you need:
 
 - normalized visible page text
+- content-scope views such as `main`, `article`, `controls`, and `overlays`
 - headings
 - links
+- primary controls and primary links ranked for likely next actions
+- form and auth-surface discovery
+- overlay and blocker diagnostics
 - canonical URL
 - likely-404 diagnostics and a suggested recovery search query
 
@@ -556,10 +565,12 @@ For robust control, use this sequence:
 
 1. start in `headless` for unattended tasks or `headful` for live debugging
 2. navigate to the target URL
-3. use `eval` / `scroll` immediately if you do not need node IDs yet
-4. call `GET /dom` when you need a fresh structural view of the page
-5. locate target node IDs from the snapshot
-6. execute `click` / `set_value` / `eval`
+3. call `GET /page/actions` to understand the best next links, controls, and blocker state
+4. call `GET /page/text?scope=main` or `GET /page/markdown?scope=article` for focused reading
+5. use `POST /page/open-link` or `POST /execute` against the surfaced controls
+6. call `GET /dom` only when you need a fresh structural view of the page
+7. locate target node IDs from the snapshot
+8. execute `click` / `set_value` / `eval`
    `scroll` is also available as a first-class command for viewport movement without ad hoc JS
 7. read incremental events with `since=<latest_sequence>`
 8. snapshot session if login or state matters

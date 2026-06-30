@@ -198,9 +198,10 @@ Research through a running runtime:
 ```bash
 aegis --server-addr 127.0.0.1:7878 search shopify app review
 aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
-aegis --server-addr 127.0.0.1:7878 page text
+aegis --server-addr 127.0.0.1:7878 page text --scope main
+aegis --server-addr 127.0.0.1:7878 page actions
+aegis --server-addr 127.0.0.1:7878 page forms
 aegis --server-addr 127.0.0.1:7878 page find release an app version
-aegis --server-addr 127.0.0.1:7878 page links
 aegis --server-addr 127.0.0.1:7878 page open-link release an app version
 ```
 
@@ -226,6 +227,8 @@ Core routes:
 - `GET /contexts/:context_id/page`
 - `GET /contexts/:context_id/page/text`
 - `GET /contexts/:context_id/page/markdown`
+- `GET /contexts/:context_id/page/actions`
+- `GET /contexts/:context_id/page/forms`
 - `GET /contexts/:context_id/page/links`
 - `GET /contexts/:context_id/page/headings`
 - `POST /contexts/:context_id/page/find`
@@ -245,6 +248,8 @@ Core routes:
 - `GET /page`
 - `GET /page/text`
 - `GET /page/markdown`
+- `GET /page/actions`
+- `GET /page/forms`
 - `GET /page/links`
 - `GET /page/headings`
 - `POST /page/find`
@@ -394,18 +399,45 @@ The page snapshot includes:
 
 ### `GET /page/text`
 
-Return normalized visible page text:
+Return normalized page text for a chosen scope. Supported scopes are `full`, `main`, `article`,
+`controls`, and `overlays`:
 
 ```bash
 curl http://127.0.0.1:7878/page/text
+curl 'http://127.0.0.1:7878/page/text?scope=main'
 ```
 
 ### `GET /page/markdown`
 
-Return a markdown projection of the current page:
+Return a markdown projection of a chosen scope:
 
 ```bash
 curl http://127.0.0.1:7878/page/markdown
+curl 'http://127.0.0.1:7878/page/markdown?scope=article'
+```
+
+### `GET /page/actions`
+
+Return a task-oriented summary of what an agent can do on this page right now:
+
+```bash
+curl http://127.0.0.1:7878/page/actions
+```
+
+The response includes:
+
+- `primary_links`
+- `primary_controls`
+- `suggested_next_actions`
+- overlay and blocker signals
+- page-type classification
+
+### `GET /page/forms`
+
+Return forms and nested controls to support login, search, and submission flows:
+
+```bash
+curl http://127.0.0.1:7878/page/forms
 ```
 
 ### `GET /page/links`

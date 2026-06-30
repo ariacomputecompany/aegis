@@ -33,8 +33,8 @@ use crate::dom::node::{DomNode, DomSnapshot};
 use crate::events::stream::{EventReadWindow, EventType, RuntimeEvent, SequencedEvent};
 use crate::host::{LoadedAegisClient, RuntimeCancelHandle};
 use crate::runtime::executor::{
-    ExecutionReport, PageBootstrapDiagnostics, PageResearchData, PageResearchHeading,
-    PageResearchLink, RuntimeStatus,
+    ExecutionReport, PageBootstrapDiagnostics, PageResearchControl, PageResearchData,
+    PageResearchForm, PageResearchHeading, PageResearchLink, RuntimeStatus,
 };
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
@@ -178,6 +178,12 @@ pub struct PageOpenLinkBody {
     pub index: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PageScopeQuery {
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
     pub engine: String,
@@ -188,10 +194,17 @@ pub struct SearchResponse {
 
 #[derive(Debug, Serialize)]
 pub struct PageTextResponse {
+    pub scope: String,
     pub title: Option<String>,
     pub url: Option<String>,
     pub canonical_url: Option<String>,
     pub text: String,
+    pub page_type: String,
+    pub useful_text_available: bool,
+    pub interactive_elements_available: bool,
+    pub blocked_by_overlay: bool,
+    pub blocker_signals: Vec<String>,
+    pub suggested_next_actions: Vec<String>,
     pub likely_not_found: bool,
     pub not_found_signals: Vec<String>,
     pub suggested_search_query: Option<String>,
@@ -199,10 +212,17 @@ pub struct PageTextResponse {
 
 #[derive(Debug, Serialize)]
 pub struct PageMarkdownResponse {
+    pub scope: String,
     pub title: Option<String>,
     pub url: Option<String>,
     pub canonical_url: Option<String>,
     pub markdown: String,
+    pub page_type: String,
+    pub useful_text_available: bool,
+    pub interactive_elements_available: bool,
+    pub blocked_by_overlay: bool,
+    pub blocker_signals: Vec<String>,
+    pub suggested_next_actions: Vec<String>,
     pub likely_not_found: bool,
     pub not_found_signals: Vec<String>,
     pub suggested_search_query: Option<String>,
@@ -226,6 +246,35 @@ pub struct PageHeadingsResponse {
     pub headings: Vec<PageResearchHeading>,
     pub likely_not_found: bool,
     pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageActionsResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub page_type: String,
+    pub useful_text_available: bool,
+    pub interactive_elements_available: bool,
+    pub blocked_by_overlay: bool,
+    pub blocker_signals: Vec<String>,
+    pub primary_links: Vec<PageResearchLink>,
+    pub primary_controls: Vec<PageResearchControl>,
+    pub suggested_next_actions: Vec<String>,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageFormsResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub page_type: String,
+    pub auth_wall_likely: bool,
+    pub blocked_by_overlay: bool,
+    pub blocker_signals: Vec<String>,
+    pub forms: Vec<PageResearchForm>,
+    pub suggested_next_actions: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1536,7 +1585,18 @@ fn build_search_url(query: &str, engine: Option<&str>) -> String {
     }
 }
 
-fn render_page_markdown(page: &PageResearchData) -> String {
+fn page_text_scope(page: &PageResearchData, scope: Option<&str>) -> (&'static str, String) {
+    match scope.map(normalize_text).as_deref() {
+        Some("main") => ("main", page.content_scopes.main_text.clone()),
+        Some("article") => ("article", page.content_scopes.article_text.clone()),
+        Some("controls") => ("controls", page.content_scopes.controls_text.clone()),
+        Some("overlays") => ("overlays", page.content_scopes.overlay_text.clone()),
+        _ => ("full", page.visible_text.clone()),
+    }
+}
+
+fn render_page_markdown(page: &PageResearchData, scope: Option<&str>) -> String {
+    let (scope_name, scoped_text) = page_text_scope(page, scope);
     let mut sections = Vec::new();
     if let Some(title) = page.title.as_ref()
         && !title.trim().is_empty()
@@ -1551,6 +1611,8 @@ fn render_page_markdown(page: &PageResearchData) -> String {
     {
         sections.push(format!("Canonical: {canonical_url}"));
     }
+    sections.push(format!("Scope: {scope_name}"));
+    sections.push(format!("Page Type: {}", page.page_type));
     if !page.headings.is_empty() {
         sections.push(String::from("## Headings"));
         sections.extend(page.headings.iter().map(|heading| {
@@ -1558,13 +1620,38 @@ fn render_page_markdown(page: &PageResearchData) -> String {
             format!("{} {}", "#".repeat(level), heading.text)
         }));
     }
-    if !page.visible_text.trim().is_empty() {
-        sections.push(String::from("## Visible Text"));
-        sections.push(page.visible_text.clone());
+    if !scoped_text.trim().is_empty() {
+        sections.push(format!("## {} Text", scope_name.to_ascii_uppercase()));
+        sections.push(scoped_text);
     }
-    if !page.links.is_empty() {
-        sections.push(String::from("## Links"));
-        sections.extend(page.links.iter().map(|link| {
+    if !page.primary_controls.is_empty() {
+        sections.push(String::from("## Primary Controls"));
+        sections.extend(page.primary_controls.iter().map(|control| {
+            let label = control
+                .label
+                .as_deref()
+                .unwrap_or(control.text.as_str())
+                .trim();
+            let label = if label.is_empty() {
+                control.kind.as_str()
+            } else {
+                label
+            };
+            format!(
+                "- {} [{}]{}",
+                label,
+                control.kind,
+                control
+                    .placeholder
+                    .as_ref()
+                    .map(|placeholder| format!(" placeholder={placeholder}"))
+                    .unwrap_or_default()
+            )
+        }));
+    }
+    if !page.primary_links.is_empty() {
+        sections.push(String::from("## Primary Links"));
+        sections.extend(page.primary_links.iter().map(|link| {
             let label = if link.text.trim().is_empty() {
                 link.href.clone()
             } else {
@@ -1573,7 +1660,86 @@ fn render_page_markdown(page: &PageResearchData) -> String {
             format!("- [{label}]({})", link.href)
         }));
     }
+    if !page.suggested_next_actions.is_empty() {
+        sections.push(String::from("## Suggested Next Actions"));
+        sections.extend(
+            page.suggested_next_actions
+                .iter()
+                .map(|action| format!("- {action}")),
+        );
+    }
     sections.join("\n\n")
+}
+
+fn page_text_response(page: &PageResearchData, scope: Option<&str>) -> PageTextResponse {
+    let (scope_name, text) = page_text_scope(page, scope);
+    PageTextResponse {
+        scope: scope_name.to_string(),
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        text,
+        page_type: page.page_type.clone(),
+        useful_text_available: page.useful_text_available,
+        interactive_elements_available: page.interactive_elements_available,
+        blocked_by_overlay: page.blocked_by_overlay,
+        blocker_signals: page.blocker_signals.clone(),
+        suggested_next_actions: page.suggested_next_actions.clone(),
+        likely_not_found: page.likely_not_found,
+        not_found_signals: page.not_found_signals.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }
+}
+
+fn page_markdown_response(page: &PageResearchData, scope: Option<&str>) -> PageMarkdownResponse {
+    let (scope_name, _) = page_text_scope(page, scope);
+    PageMarkdownResponse {
+        scope: scope_name.to_string(),
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        markdown: render_page_markdown(page, scope),
+        page_type: page.page_type.clone(),
+        useful_text_available: page.useful_text_available,
+        interactive_elements_available: page.interactive_elements_available,
+        blocked_by_overlay: page.blocked_by_overlay,
+        blocker_signals: page.blocker_signals.clone(),
+        suggested_next_actions: page.suggested_next_actions.clone(),
+        likely_not_found: page.likely_not_found,
+        not_found_signals: page.not_found_signals.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }
+}
+
+fn page_actions_response(page: &PageResearchData) -> PageActionsResponse {
+    PageActionsResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        page_type: page.page_type.clone(),
+        useful_text_available: page.useful_text_available,
+        interactive_elements_available: page.interactive_elements_available,
+        blocked_by_overlay: page.blocked_by_overlay,
+        blocker_signals: page.blocker_signals.clone(),
+        primary_links: page.primary_links.clone(),
+        primary_controls: page.primary_controls.clone(),
+        suggested_next_actions: page.suggested_next_actions.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }
+}
+
+fn page_forms_response(page: &PageResearchData) -> PageFormsResponse {
+    PageFormsResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        page_type: page.page_type.clone(),
+        auth_wall_likely: page.auth_wall_likely,
+        blocked_by_overlay: page.blocked_by_overlay,
+        blocker_signals: page.blocker_signals.clone(),
+        forms: page.forms.clone(),
+        suggested_next_actions: page.suggested_next_actions.clone(),
+    }
 }
 
 fn snippet_for_match(text: &str, normalized_query: &str) -> Option<String> {
@@ -1635,6 +1801,42 @@ fn page_find_matches(page: &PageResearchData, query: &str, exact: bool) -> Vec<P
             });
         }
     }
+    for control in &page.controls {
+        let control_text = normalize_text(
+            &[
+                control.label.as_deref().unwrap_or_default(),
+                control.text.as_str(),
+                control.placeholder.as_deref().unwrap_or_default(),
+                control.role.as_deref().unwrap_or_default(),
+            ]
+            .join(" "),
+        );
+        let matched = if exact {
+            control_text == normalized_query
+        } else {
+            control_text.contains(&normalized_query)
+        };
+        if matched {
+            matches.push(PageFindMatch {
+                kind: String::from("control"),
+                text: control
+                    .label
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| control.text.clone()),
+                level: None,
+                href: control.href.clone(),
+                index: Some(control.index),
+                snippet: control.placeholder.clone().or_else(|| {
+                    if control.actions.is_empty() {
+                        None
+                    } else {
+                        Some(control.actions.join(", "))
+                    }
+                }),
+            });
+        }
+    }
     if let Some(snippet) = snippet_for_match(&page.visible_text, &normalized_query) {
         matches.push(PageFindMatch {
             kind: String::from("text"),
@@ -1670,9 +1872,9 @@ fn matching_links(
             } else {
                 link_text.contains(&normalized_text)
             };
-            let href_matches = normalized_href.as_ref().is_none_or(|needle| {
-                normalize_text(&link.href).contains(needle)
-            });
+            let href_matches = normalized_href
+                .as_ref()
+                .is_none_or(|needle| normalize_text(&link.href).contains(needle));
             text_matches && href_matches
         })
         .cloned()
@@ -1806,6 +2008,11 @@ pub fn router(state: ServeRootState) -> Router {
             "/contexts/{context_id}/page/markdown",
             get(context_page_markdown),
         )
+        .route(
+            "/contexts/{context_id}/page/actions",
+            get(context_page_actions),
+        )
+        .route("/contexts/{context_id}/page/forms", get(context_page_forms))
         .route("/contexts/{context_id}/page/links", get(context_page_links))
         .route(
             "/contexts/{context_id}/page/headings",
@@ -1842,6 +2049,8 @@ pub fn router(state: ServeRootState) -> Router {
         .route("/page", get(page_research))
         .route("/page/text", get(page_text))
         .route("/page/markdown", get(page_markdown))
+        .route("/page/actions", get(page_actions))
+        .route("/page/forms", get(page_forms))
         .route("/page/links", get(page_links))
         .route("/page/headings", get(page_headings))
         .route("/page/find", post(page_find))
@@ -2332,7 +2541,11 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                     search_body_example(),
                 )),
                 responses: vec![
-                    json_response(200, "Search navigation metadata and events", "SearchResponse"),
+                    json_response(
+                        200,
+                        "Search navigation metadata and events",
+                        "SearchResponse",
+                    ),
                     json_response(400, "Invalid search request", "ApiErrorBody"),
                 ],
             },
@@ -2367,25 +2580,56 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 )],
                 query: vec![],
                 request_body: None,
-                responses: vec![json_response(200, "Page research snapshot", "PageResearchData")],
+                responses: vec![json_response(
+                    200,
+                    "Page research snapshot",
+                    "PageResearchData",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/page/text",
-                summary: "Read visible page text for one context",
+                summary: "Read page text in one content scope for one context",
                 params: vec![path_param(
                     "context_id",
                     "string",
                     "Named browser context id",
                 )],
-                query: vec![],
+                query: vec![query_param(
+                    "scope",
+                    "string",
+                    false,
+                    "Optional content scope: full, main, article, controls, or overlays",
+                )],
                 request_body: None,
                 responses: vec![json_response(200, "Page text snapshot", "PageTextResponse")],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/page/markdown",
-                summary: "Read a markdown projection of the current page for one context",
+                summary: "Read a markdown projection of one page content scope for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![query_param(
+                    "scope",
+                    "string",
+                    false,
+                    "Optional content scope: full, main, article, controls, or overlays",
+                )],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Page markdown projection",
+                    "PageMarkdownResponse",
+                )],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/{context_id}/page/actions",
+                summary: "Summarize what an agent can do on this page right now for one context",
                 params: vec![path_param(
                     "context_id",
                     "string",
@@ -2395,8 +2639,25 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 request_body: None,
                 responses: vec![json_response(
                     200,
-                    "Page markdown projection",
-                    "PageMarkdownResponse",
+                    "Page action summary",
+                    "PageActionsResponse",
+                )],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/{context_id}/page/forms",
+                summary: "List forms and form controls on the current page for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Page form inventory",
+                    "PageFormsResponse",
                 )],
             },
             ApiRouteDoc {
@@ -2410,7 +2671,11 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 )],
                 query: vec![],
                 request_body: None,
-                responses: vec![json_response(200, "Page link inventory", "PageLinksResponse")],
+                responses: vec![json_response(
+                    200,
+                    "Page link inventory",
+                    "PageLinksResponse",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
@@ -2464,7 +2729,11 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 )),
                 responses: vec![
                     json_response(200, "Chosen link navigation result", "PageOpenLinkResponse"),
-                    json_response(400, "Invalid or ambiguous link-open request", "ApiErrorBody"),
+                    json_response(
+                        400,
+                        "Invalid or ambiguous link-open request",
+                        "ApiErrorBody",
+                    ),
                 ],
             },
             ApiRouteDoc {
@@ -2542,10 +2811,7 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                     "Named browser context id",
                 )],
                 query: vec![],
-                request_body: Some(json_request_with_example(
-                    "TraceBody",
-                    trace_body_example(),
-                )),
+                request_body: Some(json_request_with_example("TraceBody", trace_body_example())),
                 responses: vec![
                     empty_response(204, "Trace recording enabled"),
                     json_response(400, "Invalid trace path request", "ApiErrorBody"),
@@ -2669,7 +2935,11 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                     search_body_example(),
                 )),
                 responses: vec![
-                    json_response(200, "Search navigation metadata and events", "SearchResponse"),
+                    json_response(
+                        200,
+                        "Search navigation metadata and events",
+                        "SearchResponse",
+                    ),
                     json_response(400, "Invalid search request", "ApiErrorBody"),
                 ],
             },
@@ -2696,23 +2966,37 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 params: vec![],
                 query: vec![],
                 request_body: None,
-                responses: vec![json_response(200, "Page research snapshot", "PageResearchData")],
+                responses: vec![json_response(
+                    200,
+                    "Page research snapshot",
+                    "PageResearchData",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/page/text",
-                summary: "Read visible page text",
+                summary: "Read page text in one content scope",
                 params: vec![],
-                query: vec![],
+                query: vec![query_param(
+                    "scope",
+                    "string",
+                    false,
+                    "Optional content scope: full, main, article, controls, or overlays",
+                )],
                 request_body: None,
                 responses: vec![json_response(200, "Page text snapshot", "PageTextResponse")],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/page/markdown",
-                summary: "Read a markdown projection of the current page",
+                summary: "Read a markdown projection of one page content scope",
                 params: vec![],
-                query: vec![],
+                query: vec![query_param(
+                    "scope",
+                    "string",
+                    false,
+                    "Optional content scope: full, main, article, controls, or overlays",
+                )],
                 request_body: None,
                 responses: vec![json_response(
                     200,
@@ -2722,12 +3006,42 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
             },
             ApiRouteDoc {
                 method: "GET",
+                path: "/page/actions",
+                summary: "Summarize what an agent can do on this page right now",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Page action summary",
+                    "PageActionsResponse",
+                )],
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/page/forms",
+                summary: "List forms and form controls on the current page",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Page form inventory",
+                    "PageFormsResponse",
+                )],
+            },
+            ApiRouteDoc {
+                method: "GET",
                 path: "/page/links",
                 summary: "List page links",
                 params: vec![],
                 query: vec![],
                 request_body: None,
-                responses: vec![json_response(200, "Page link inventory", "PageLinksResponse")],
+                responses: vec![json_response(
+                    200,
+                    "Page link inventory",
+                    "PageLinksResponse",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
@@ -2769,7 +3083,11 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 )),
                 responses: vec![
                     json_response(200, "Chosen link navigation result", "PageOpenLinkResponse"),
-                    json_response(400, "Invalid or ambiguous link-open request", "ApiErrorBody"),
+                    json_response(
+                        400,
+                        "Invalid or ambiguous link-open request",
+                        "ApiErrorBody",
+                    ),
                 ],
             },
             ApiRouteDoc {
@@ -2878,10 +3196,7 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 summary: "Enable trace recording",
                 params: vec![],
                 query: vec![],
-                request_body: Some(json_request_with_example(
-                    "TraceBody",
-                    trace_body_example(),
-                )),
+                request_body: Some(json_request_with_example("TraceBody", trace_body_example())),
                 responses: vec![
                     empty_response(204, "Trace recording enabled"),
                     json_response(400, "Invalid trace path request", "ApiErrorBody"),
@@ -3316,6 +3631,126 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                 ],
             },
             ApiNamedSchemaDoc {
+                name: "PageResearchHeading",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "level",
+                        kind: "u8|null",
+                        required: true,
+                        description: "Heading depth when available",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "text",
+                        kind: "string",
+                        required: true,
+                        description: "Visible heading text",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "id",
+                        kind: "string|null",
+                        required: true,
+                        description: "DOM id attached to the heading when available",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageResearchLink",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "index",
+                        kind: "usize",
+                        required: true,
+                        description: "Zero-based link index in capture order",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "text",
+                        kind: "string",
+                        required: true,
+                        description: "Visible link label or fallback href text",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "href",
+                        kind: "string",
+                        required: true,
+                        description: "Resolved absolute href",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "title",
+                        kind: "string|null",
+                        required: true,
+                        description: "Optional title attribute or hover text",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageResearchControl",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "index",
+                        kind: "usize",
+                        required: true,
+                        description: "Zero-based control index in capture order",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "kind",
+                        kind: "string",
+                        required: true,
+                        description: "Control kind such as button, input, link_button, or select",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "text",
+                        kind: "string",
+                        required: true,
+                        description: "Visible control text",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "label",
+                        kind: "string|null",
+                        required: true,
+                        description: "Associated accessible label when available",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "actions",
+                        kind: "string[]",
+                        required: true,
+                        description: "Likely allowed actions such as click, type, select, or submit",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageResearchForm",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "index",
+                        kind: "usize",
+                        required: true,
+                        description: "Zero-based form index in capture order",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "action",
+                        kind: "string|null",
+                        required: true,
+                        description: "Resolved form action target when present",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "method",
+                        kind: "string|null",
+                        required: true,
+                        description: "Form submission method when present",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "controls",
+                        kind: "PageResearchControl[]",
+                        required: true,
+                        description: "Controls nested under this form",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
                 name: "PageResearchData",
                 kind: "object",
                 fields: vec![
@@ -3355,26 +3790,136 @@ fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
                         required: true,
                         description: "Link inventory extracted from the current page",
                     },
+                    ApiSchemaFieldDoc {
+                        name: "primary_links",
+                        kind: "PageResearchLink[]",
+                        required: true,
+                        description: "Highest-signal links ranked for next-step navigation",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "controls",
+                        kind: "PageResearchControl[]",
+                        required: true,
+                        description: "Interactive controls captured from the current page",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "primary_controls",
+                        kind: "PageResearchControl[]",
+                        required: true,
+                        description: "Highest-signal controls ranked for likely next actions",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "forms",
+                        kind: "PageResearchForm[]",
+                        required: true,
+                        description: "Form inventory for auth and submission workflows",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "page_type",
+                        kind: "string",
+                        required: true,
+                        description: "Page classifier such as content, documentation, search_results, auth, or not_found",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "blocked_by_overlay",
+                        kind: "bool",
+                        required: true,
+                        description: "Whether an overlay likely blocks interaction with the underlying page",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "suggested_next_actions",
+                        kind: "string[]",
+                        required: true,
+                        description: "Opinionated next steps derived from the page snapshot",
+                    },
                 ],
             },
             ApiNamedSchemaDoc {
                 name: "PageTextResponse",
                 kind: "object",
-                fields: vec![ApiSchemaFieldDoc {
-                    name: "text",
-                    kind: "string",
-                    required: true,
-                    description: "Normalized visible page text",
-                }],
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "scope",
+                        kind: "string",
+                        required: true,
+                        description: "Resolved content scope used for this response",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "text",
+                        kind: "string",
+                        required: true,
+                        description: "Normalized visible page text for the requested scope",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "page_type",
+                        kind: "string",
+                        required: true,
+                        description: "High-level page classifier to guide agent recovery logic",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "suggested_next_actions",
+                        kind: "string[]",
+                        required: true,
+                        description: "Recommended follow-up actions after inspecting this scope",
+                    },
+                ],
             },
             ApiNamedSchemaDoc {
                 name: "PageMarkdownResponse",
                 kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "scope",
+                        kind: "string",
+                        required: true,
+                        description: "Resolved content scope used for this response",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "markdown",
+                        kind: "string",
+                        required: true,
+                        description: "Markdown projection of the current page research snapshot",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "page_type",
+                        kind: "string",
+                        required: true,
+                        description: "High-level page classifier to guide agent recovery logic",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageActionsResponse",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "primary_links",
+                        kind: "PageResearchLink[]",
+                        required: true,
+                        description: "Most relevant navigation targets for the current task surface",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "primary_controls",
+                        kind: "PageResearchControl[]",
+                        required: true,
+                        description: "Most relevant interactive controls for the current task surface",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "suggested_next_actions",
+                        kind: "string[]",
+                        required: true,
+                        description: "Opinionated next-step recommendations for the active page",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "PageFormsResponse",
+                kind: "object",
                 fields: vec![ApiSchemaFieldDoc {
-                    name: "markdown",
-                    kind: "string",
+                    name: "forms",
+                    kind: "PageResearchForm[]",
                     required: true,
-                    description: "Markdown projection of the current page research snapshot",
+                    description: "Forms and nested controls available on the current page",
                 }],
             },
             ApiNamedSchemaDoc {
@@ -3884,7 +4429,10 @@ fn invalid_json_request(
         serde_json::to_string_pretty(&example).unwrap_or_else(|_| example.to_string());
     ApiError::bad_request(
         "invalid_json_body",
-        format!("invalid JSON body for `{operation}`: {}", rejection.body_text()),
+        format!(
+            "invalid JSON body for `{operation}`: {}",
+            rejection.body_text()
+        ),
         Some(format!(
             "send `content-type: application/json` with a body like:\n{example_json}"
         )),
@@ -3942,9 +4490,8 @@ async fn execute(
     State(root): State<ServeRootState>,
     body: Result<Json<ExecuteBody>, JsonRejection>,
 ) -> Result<Json<ExecutionReport>, ApiError> {
-    let Json(body) = body.map_err(|rejection| {
-        invalid_json_request("execute", execute_body_example(), rejection)
-    })?;
+    let Json(body) = body
+        .map_err(|rejection| invalid_json_request("execute", execute_body_example(), rejection))?;
     let state = require_default_context_state(&root)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     state
@@ -3963,34 +4510,20 @@ async fn page_research(
 
 async fn page_text(
     State(root): State<ServeRootState>,
+    Query(query): Query<PageScopeQuery>,
 ) -> Result<Json<PageTextResponse>, ApiError> {
     let state = require_default_context_state(&root)?;
     let page = snapshot_page_research(&state).await?;
-    Ok(Json(PageTextResponse {
-        title: page.title.clone(),
-        url: page.url.clone(),
-        canonical_url: page.canonical_url.clone(),
-        text: page.visible_text.clone(),
-        likely_not_found: page.likely_not_found,
-        not_found_signals: page.not_found_signals.clone(),
-        suggested_search_query: page.suggested_search_query.clone(),
-    }))
+    Ok(Json(page_text_response(&page, query.scope.as_deref())))
 }
 
 async fn page_markdown(
     State(root): State<ServeRootState>,
+    Query(query): Query<PageScopeQuery>,
 ) -> Result<Json<PageMarkdownResponse>, ApiError> {
     let state = require_default_context_state(&root)?;
     let page = snapshot_page_research(&state).await?;
-    Ok(Json(PageMarkdownResponse {
-        title: page.title.clone(),
-        url: page.url.clone(),
-        canonical_url: page.canonical_url.clone(),
-        markdown: render_page_markdown(&page),
-        likely_not_found: page.likely_not_found,
-        not_found_signals: page.not_found_signals.clone(),
-        suggested_search_query: page.suggested_search_query.clone(),
-    }))
+    Ok(Json(page_markdown_response(&page, query.scope.as_deref())))
 }
 
 async fn page_links(
@@ -4023,12 +4556,29 @@ async fn page_headings(
     }))
 }
 
+async fn page_actions(
+    State(root): State<ServeRootState>,
+) -> Result<Json<PageActionsResponse>, ApiError> {
+    let state = require_default_context_state(&root)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(page_actions_response(&page)))
+}
+
+async fn page_forms(
+    State(root): State<ServeRootState>,
+) -> Result<Json<PageFormsResponse>, ApiError> {
+    let state = require_default_context_state(&root)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(page_forms_response(&page)))
+}
+
 async fn page_find(
     State(root): State<ServeRootState>,
     body: Result<Json<PageFindBody>, JsonRejection>,
 ) -> Result<Json<PageFindResponse>, ApiError> {
-    let Json(body) =
-        body.map_err(|rejection| invalid_json_request("page_find", page_find_body_example(), rejection))?;
+    let Json(body) = body.map_err(|rejection| {
+        invalid_json_request("page_find", page_find_body_example(), rejection)
+    })?;
     let state = require_default_context_state(&root)?;
     let page = snapshot_page_research(&state).await?;
     let matches = page_find_matches(&page, &body.text, body.exact);
@@ -4346,9 +4896,8 @@ async fn context_execute(
     Path(context_id): Path<String>,
     body: Result<Json<ExecuteBody>, JsonRejection>,
 ) -> Result<Json<ExecutionReport>, ApiError> {
-    let Json(body) = body.map_err(|rejection| {
-        invalid_json_request("execute", execute_body_example(), rejection)
-    })?;
+    let Json(body) = body
+        .map_err(|rejection| invalid_json_request("execute", execute_body_example(), rejection))?;
     let state = require_context_state(&root, &context_id)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     state
@@ -4369,35 +4918,21 @@ async fn context_page_research(
 async fn context_page_text(
     State(root): State<ServeRootState>,
     Path(context_id): Path<String>,
+    Query(query): Query<PageScopeQuery>,
 ) -> Result<Json<PageTextResponse>, ApiError> {
     let state = require_context_state(&root, &context_id)?;
     let page = snapshot_page_research(&state).await?;
-    Ok(Json(PageTextResponse {
-        title: page.title.clone(),
-        url: page.url.clone(),
-        canonical_url: page.canonical_url.clone(),
-        text: page.visible_text.clone(),
-        likely_not_found: page.likely_not_found,
-        not_found_signals: page.not_found_signals.clone(),
-        suggested_search_query: page.suggested_search_query.clone(),
-    }))
+    Ok(Json(page_text_response(&page, query.scope.as_deref())))
 }
 
 async fn context_page_markdown(
     State(root): State<ServeRootState>,
     Path(context_id): Path<String>,
+    Query(query): Query<PageScopeQuery>,
 ) -> Result<Json<PageMarkdownResponse>, ApiError> {
     let state = require_context_state(&root, &context_id)?;
     let page = snapshot_page_research(&state).await?;
-    Ok(Json(PageMarkdownResponse {
-        title: page.title.clone(),
-        url: page.url.clone(),
-        canonical_url: page.canonical_url.clone(),
-        markdown: render_page_markdown(&page),
-        likely_not_found: page.likely_not_found,
-        not_found_signals: page.not_found_signals.clone(),
-        suggested_search_query: page.suggested_search_query.clone(),
-    }))
+    Ok(Json(page_markdown_response(&page, query.scope.as_deref())))
 }
 
 async fn context_page_links(
@@ -4432,13 +4967,32 @@ async fn context_page_headings(
     }))
 }
 
+async fn context_page_actions(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+) -> Result<Json<PageActionsResponse>, ApiError> {
+    let state = require_context_state(&root, &context_id)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(page_actions_response(&page)))
+}
+
+async fn context_page_forms(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+) -> Result<Json<PageFormsResponse>, ApiError> {
+    let state = require_context_state(&root, &context_id)?;
+    let page = snapshot_page_research(&state).await?;
+    Ok(Json(page_forms_response(&page)))
+}
+
 async fn context_page_find(
     State(root): State<ServeRootState>,
     Path(context_id): Path<String>,
     body: Result<Json<PageFindBody>, JsonRejection>,
 ) -> Result<Json<PageFindResponse>, ApiError> {
-    let Json(body) =
-        body.map_err(|rejection| invalid_json_request("page_find", page_find_body_example(), rejection))?;
+    let Json(body) = body.map_err(|rejection| {
+        invalid_json_request("page_find", page_find_body_example(), rejection)
+    })?;
     let state = require_context_state(&root, &context_id)?;
     let page = snapshot_page_research(&state).await?;
     let matches = page_find_matches(&page, &body.text, body.exact);
@@ -5703,7 +6257,11 @@ mod tests {
                 .and_then(|body| body.example.as_ref())
                 .is_some()
         );
-        assert!(manifest.capabilities.contains(&"research_workflow_primitives"));
+        assert!(
+            manifest
+                .capabilities
+                .contains(&"research_workflow_primitives")
+        );
         assert!(
             manifest
                 .routes
@@ -5741,6 +6299,7 @@ mod tests {
             likely_not_found: false,
             not_found_signals: Vec::new(),
             suggested_search_query: None,
+            ..Default::default()
         };
         let matches = page_find_matches(&page, "release an app version", false);
         assert!(matches.iter().any(|entry| entry.kind == "heading"));

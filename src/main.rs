@@ -124,9 +124,7 @@ enum Commands {
     #[command(about = "Show example commands for common Aegis workflows")]
     Examples,
     #[command(about = "Navigate a running Aegis serve runtime to a URL")]
-    Navigate {
-        url: String,
-    },
+    Navigate { url: String },
     #[command(about = "Run a first-class web search in a running Aegis serve runtime")]
     Search {
         #[arg(required = true, num_args = 1..)]
@@ -166,10 +164,26 @@ enum TraceCommands {
 enum PageCommands {
     #[command(about = "Inspect the structured current-page research snapshot")]
     Inspect,
-    #[command(about = "Print visible page text")]
-    Text,
-    #[command(about = "Print a markdown projection of the current page")]
-    Markdown,
+    #[command(about = "Print page text from a selected content scope")]
+    Text {
+        #[arg(
+            long,
+            help = "Scope to read: full, main, article, controls, or overlays"
+        )]
+        scope: Option<String>,
+    },
+    #[command(about = "Print a markdown projection of a selected content scope")]
+    Markdown {
+        #[arg(
+            long,
+            help = "Scope to read: full, main, article, controls, or overlays"
+        )]
+        scope: Option<String>,
+    },
+    #[command(about = "Summarize the most relevant links, controls, and next actions")]
+    Actions,
+    #[command(about = "List forms and form controls")]
+    Forms,
     #[command(about = "List page headings")]
     Headings,
     #[command(about = "List page links")]
@@ -317,9 +331,9 @@ Aegis production usage
 5. Research through a running control plane:
    aegis --server-addr 127.0.0.1:7878 search shopify app review
    aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
-   aegis --server-addr 127.0.0.1:7878 page text
+   aegis --server-addr 127.0.0.1:7878 page text --scope main
+   aegis --server-addr 127.0.0.1:7878 page actions
    aegis --server-addr 127.0.0.1:7878 page find release an app version
-   aegis --server-addr 127.0.0.1:7878 page links
    aegis --server-addr 127.0.0.1:7878 page open-link release an app version
 
 6. Native maintenance:
@@ -369,10 +383,11 @@ Research through a running serve process:
   aegis --server-addr 127.0.0.1:7878 search shopify app review
   aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
   aegis --server-addr 127.0.0.1:7878 page inspect
-  aegis --server-addr 127.0.0.1:7878 page text
-  aegis --server-addr 127.0.0.1:7878 page markdown
+  aegis --server-addr 127.0.0.1:7878 page text --scope main
+  aegis --server-addr 127.0.0.1:7878 page markdown --scope article
+  aegis --server-addr 127.0.0.1:7878 page actions
+  aegis --server-addr 127.0.0.1:7878 page forms
   aegis --server-addr 127.0.0.1:7878 page find redirect to your app's ui
-  aegis --server-addr 127.0.0.1:7878 page links
   aegis --server-addr 127.0.0.1:7878 page open-link release an app version
 
 Inspect native paths:
@@ -572,21 +587,31 @@ fn handle_page_command(
             let value = serve_json_request(addr, "GET", "/page", None)?;
             print_json_value(&value)?;
         }
-        PageCommands::Text => {
-            let value = serve_json_request(addr, "GET", "/page/text", None)?;
+        PageCommands::Text { scope } => {
+            let path = scoped_page_path("/page/text", scope.as_deref());
+            let value = serve_json_request(addr, "GET", &path, None)?;
             if let Some(text) = value.get("text").and_then(Value::as_str) {
                 println!("{text}");
             } else {
                 print_json_value(&value)?;
             }
         }
-        PageCommands::Markdown => {
-            let value = serve_json_request(addr, "GET", "/page/markdown", None)?;
+        PageCommands::Markdown { scope } => {
+            let path = scoped_page_path("/page/markdown", scope.as_deref());
+            let value = serve_json_request(addr, "GET", &path, None)?;
             if let Some(markdown) = value.get("markdown").and_then(Value::as_str) {
                 println!("{markdown}");
             } else {
                 print_json_value(&value)?;
             }
+        }
+        PageCommands::Actions => {
+            let value = serve_json_request(addr, "GET", "/page/actions", None)?;
+            print_json_value(&value)?;
+        }
+        PageCommands::Forms => {
+            let value = serve_json_request(addr, "GET", "/page/forms", None)?;
+            print_json_value(&value)?;
         }
         PageCommands::Headings => {
             let value = serve_json_request(addr, "GET", "/page/headings", None)?;
@@ -629,6 +654,13 @@ fn handle_page_command(
         }
     }
     Ok(())
+}
+
+fn scoped_page_path(base: &str, scope: Option<&str>) -> String {
+    match scope.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(scope) => format!("{base}?scope={scope}"),
+        None => base.to_string(),
+    }
 }
 
 fn serve_json_request(
@@ -680,7 +712,10 @@ fn serve_json_request(
     let body_text = std::str::from_utf8(body_slice)?.trim();
     if !(200..300).contains(&status) {
         if let Ok(error) = serde_json::from_str::<CliApiErrorBody>(body_text) {
-            let mut message = format!("Aegis API {method} {path} failed ({status}): {}", error.error);
+            let mut message = format!(
+                "Aegis API {method} {path} failed ({status}): {}",
+                error.error
+            );
             message.push_str(&format!(" [code={}]", error.code));
             if let Some(suggested_action) = error.suggested_action {
                 message.push_str(&format!("\nSuggested action: {suggested_action}"));
