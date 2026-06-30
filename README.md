@@ -88,7 +88,7 @@ Top-level commands:
 - `config credentials-set`
 - `config credentials-remove`
 - `config credentials-clear`
-- `trace replay`
+- `trace inspect`
 - `native status`
 - `native doctor`
 - `native configure`
@@ -295,9 +295,11 @@ Aegis also normalizes a leading `return ...;` if you accidentally send one.
 Execution model:
 
 - `navigate` returns ordered navigation/events quickly and invalidates the cached DOM tree
-- `GET /dom` or a node-ID command such as `click` / `set_value` materializes a fresh DOM snapshot on demand
+- one `POST /execute` batch is dispatched as one runtime batch instead of one bridge roundtrip per command
+- matcher-based commands resolve against the live renderer DOM at execution time, so semantic `match` targets stay valid across reactive page updates better than cached node ids
+- `GET /dom` still gives the stable materialized snapshot for inspection and text search
 - `hover` and matcher-based `press_key` resolve against the live DOM with strict action-aware ranking
-- `wait_for` executes inside the runtime owner loop, polling live page metadata and optionally DOM conditions until the condition is satisfied or times out
+- `wait_for` executes inside the runtime owner loop, polling live page metadata and optional DOM conditions until the condition is satisfied or times out
 - `execute` can omit the snapshot for low-latency commands like `eval` and `scroll`
 - incremental state flows through `GET /events`
 
@@ -374,10 +376,10 @@ curl -X POST http://127.0.0.1:7878/trace/enable \
   -d '{"path":"traces/run.json"}'
 ```
 
-Replay later with:
+Inspect later with:
 
 ```bash
-aegis trace replay traces/run.json
+aegis trace inspect traces/run.json
 ```
 
 ## Agent Loop
@@ -462,6 +464,8 @@ a stable local app path. On macOS it also clears quarantine attributes and suppo
 
 The Fozzy gate is the canonical validation surface:
 
+- deterministic verification starts with `fozzy doctor --deep ... --runs 5 --seed 424242 --strict`
+- the canonical host-backed trace path is `fozzy run ... --det --strict-verify --record ...` followed by `fozzy trace verify`, `fozzy replay`, and `fozzy ci`
 - `tests/aegis_core.fozzy.json` validates core Rust/test/clippy behavior
 - `tests/aegis_host_backed.fozzy.json` validates the host-backed runtime flow
 - `tests/aegis_native_doctor.fozzy.json` validates the shared native preflight contract

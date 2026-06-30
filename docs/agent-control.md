@@ -81,6 +81,8 @@ Fozzy is the canonical verification driver:
 - `tests/aegis_core.fozzy.json` covers the core deterministic gate
 - `tests/aegis_host_backed.fozzy.json` covers the host-backed runtime path
 - `tests/aegis_native_doctor.fozzy.json` covers the shared native preflight contract
+- start deterministic verification with `fozzy doctor --deep --scenario <scenario> --runs 5 --seed 424242 --strict`
+- record at least one real host-backed trace, then run `fozzy trace verify`, `fozzy replay`, and `fozzy ci` against it
 - `./scripts/run_fozzy_full.sh` is the full local Fozzy gate
 Use `aegis native doctor` whenever you need the canonical install paths, workspace artifact paths,
 missing-tool report, or configure/build/install readiness from one source of truth.
@@ -367,6 +369,8 @@ Additional command types:
 Notes:
 - `navigate` returns quickly with ordered navigation/events and invalidates the cached DOM tree
 - `GET /dom` or a DOM-targeting command such as `click` / `set_value` repopulates the DOM snapshot on demand
+- one `execute` request is sent through the runtime as one command batch, which preserves command ordering without paying one bridge roundtrip per command
+- semantic `match` targets are resolved against the live renderer DOM at execution time, so they are the preferred production contract on reactive pages
 - `click`, `hover`, and `set_value` use strict action-aware target resolution and return richer match diagnostics
 - `press_key` can target the currently focused element or an explicit nested `target`
 - `wait_for` can poll `url_contains`, `title_contains`, `text`, `ready_state`, and an optional `target`
