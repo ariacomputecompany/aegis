@@ -142,6 +142,20 @@ Start the API server:
 aegis --mode headful serve --addr 127.0.0.1:7878
 ```
 
+Research through a running runtime:
+
+```bash
+aegis --server-addr 127.0.0.1:7878 search shopify app review
+aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
+aegis --server-addr 127.0.0.1:7878 page inspect
+aegis --server-addr 127.0.0.1:7878 page text --scope main
+aegis --server-addr 127.0.0.1:7878 page markdown --scope article
+aegis --server-addr 127.0.0.1:7878 page actions
+aegis --server-addr 127.0.0.1:7878 page forms
+aegis --server-addr 127.0.0.1:7878 page find redirect to your app's ui
+aegis --server-addr 127.0.0.1:7878 page open-link release an app version
+```
+
 Measure cold-start and first-command latency:
 
 ```bash
@@ -238,6 +252,31 @@ curl http://127.0.0.1:7878/healthz
 ```
 
 After `aegis serve` reports ready, health is expected to be immediately command-ready.
+
+### Page Research
+
+```bash
+curl -X POST http://127.0.0.1:7878/search \
+  -H 'content-type: application/json' \
+  -d '{"query":"shopify app review","engine":"duckduckgo"}'
+
+curl http://127.0.0.1:7878/page
+curl 'http://127.0.0.1:7878/page/text?scope=main'
+curl 'http://127.0.0.1:7878/page/markdown?scope=article'
+curl http://127.0.0.1:7878/page/actions
+curl http://127.0.0.1:7878/page/forms
+curl http://127.0.0.1:7878/page/links
+curl http://127.0.0.1:7878/page/headings
+```
+
+The page research routes are the first-class alternative to dumping `/dom` when you need:
+
+- normalized visible page text
+- content-scope views such as `main`, `article`, `controls`, and `overlays`
+- primary controls and primary links ranked for likely next actions
+- form and auth-surface discovery
+- overlay and blocker diagnostics
+- direct `page find` and `page open-link` helpers for navigation loops
 Production startup should not sit in a long-lived `starting` state with a bound control plane.
 
 ### Runtime Info

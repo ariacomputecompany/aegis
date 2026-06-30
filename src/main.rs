@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use aegis::api::server;
 use aegis::{
@@ -9,6 +10,8 @@ use aegis::{
     replay_trace,
 };
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 #[derive(Parser)]
 #[command(name = "aegis")]
@@ -48,6 +51,14 @@ struct Cli {
     )]
     #[arg(long, global = true)]
     start_url: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        default_value = "127.0.0.1:7878",
+        help = "Address of a running `aegis serve` control plane for client commands like search, navigate, and page workflows."
+    )]
+    #[arg(long, global = true, default_value = "127.0.0.1:7878")]
+    server_addr: SocketAddr,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -76,6 +87,20 @@ enum Commands {
     Usage,
     #[command(about = "Show example commands for common Aegis workflows")]
     Examples,
+    #[command(about = "Navigate a running Aegis serve runtime to a URL")]
+    Navigate { url: String },
+    #[command(about = "Run a first-class web search in a running Aegis serve runtime")]
+    Search {
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        #[arg(long)]
+        engine: Option<String>,
+    },
+    #[command(about = "Read and act on the current page through a running Aegis serve runtime")]
+    Page {
+        #[command(subcommand)]
+        command: PageCommands,
+    },
     #[command(about = "Replay deterministic traces")]
     Trace {
         #[command(subcommand)]
@@ -97,6 +122,54 @@ enum Commands {
 enum TraceCommands {
     #[command(about = "Inspect a recorded Aegis trace file")]
     Inspect { path: PathBuf },
+}
+
+#[derive(Clone, Subcommand)]
+enum PageCommands {
+    #[command(about = "Inspect the structured current-page research snapshot")]
+    Inspect,
+    #[command(about = "Print page text from a selected content scope")]
+    Text {
+        #[arg(
+            long,
+            help = "Scope to read: full, main, article, controls, or overlays"
+        )]
+        scope: Option<String>,
+    },
+    #[command(about = "Print a markdown projection of a selected content scope")]
+    Markdown {
+        #[arg(
+            long,
+            help = "Scope to read: full, main, article, controls, or overlays"
+        )]
+        scope: Option<String>,
+    },
+    #[command(about = "Summarize the most relevant links, controls, and next actions")]
+    Actions,
+    #[command(about = "List forms and form controls")]
+    Forms,
+    #[command(about = "List page headings")]
+    Headings,
+    #[command(about = "List page links")]
+    Links,
+    #[command(about = "Find text, headings, or links on the current page")]
+    Find {
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        #[arg(long)]
+        exact: bool,
+    },
+    #[command(about = "Open a page link by text match")]
+    OpenLink {
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        #[arg(long)]
+        exact: bool,
+        #[arg(long)]
+        href_contains: Option<String>,
+        #[arg(long)]
+        index: Option<usize>,
+    },
 }
 
 #[derive(Clone, Subcommand)]
@@ -212,7 +285,14 @@ Aegis production usage
    aegis config get credentials
    aegis config credentials-list --profile default
 
-5. Native maintenance:
+5. Research through a running control plane:
+   aegis --server-addr 127.0.0.1:7878 search shopify app review
+   aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
+   aegis --server-addr 127.0.0.1:7878 page text --scope main
+   aegis --server-addr 127.0.0.1:7878 page actions
+   aegis --server-addr 127.0.0.1:7878 page open-link release an app version
+
+6. Native maintenance:
  aegis native paths
   aegis native doctor
   aegis native build --configuration release --target aegis_host
@@ -249,6 +329,17 @@ Remove one credential:
 
 Inspect a trace:
   aegis trace inspect traces/run.fozzy
+
+Research through a running serve process:
+  aegis --server-addr 127.0.0.1:7878 search shopify app review
+  aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
+  aegis --server-addr 127.0.0.1:7878 page inspect
+  aegis --server-addr 127.0.0.1:7878 page text --scope main
+  aegis --server-addr 127.0.0.1:7878 page markdown --scope article
+  aegis --server-addr 127.0.0.1:7878 page actions
+  aegis --server-addr 127.0.0.1:7878 page forms
+  aegis --server-addr 127.0.0.1:7878 page find redirect to your app's ui
+  aegis --server-addr 127.0.0.1:7878 page open-link release an app version
 
 Inspect native paths:
   aegis native paths";
@@ -295,6 +386,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Examples => {
             println!("{EXAMPLES_TEXT}");
+            return Ok(());
+        }
+        Commands::Navigate { url } => {
+            let value = serve_json_request(
+                cli.server_addr,
+                "POST",
+                "/navigate",
+                Some(&json!({ "url": url })),
+            )?;
+            print_json_value(&value)?;
+            return Ok(());
+        }
+        Commands::Search { query, engine } => {
+            let value = serve_json_request(
+                cli.server_addr,
+                "POST",
+                "/search",
+                Some(&json!({
+                    "query": query.join(" "),
+                    "engine": engine
+                })),
+            )?;
+            print_json_value(&value)?;
+            return Ok(());
+        }
+        Commands::Page { command } => {
+            handle_page_command(cli.server_addr, command.clone())?;
             return Ok(());
         }
         Commands::Config { command } => {
@@ -349,6 +467,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::Usage => unreachable!("handled before host init"),
         Commands::Examples => unreachable!("handled before host init"),
+        Commands::Navigate { .. } => unreachable!("handled before host init"),
+        Commands::Search { .. } => unreachable!("handled before host init"),
+        Commands::Page { .. } => unreachable!("handled before host init"),
         Commands::Config { .. } => unreachable!("handled before host init"),
         Commands::Native { .. } => unreachable!("handled before runtime startup"),
     }
@@ -408,6 +529,188 @@ fn effective_mode(cli: &Cli) -> BrowserModeArg {
 
 fn default_open_shortcut_requested() -> bool {
     std::env::args_os().len() == 1
+}
+
+#[derive(Debug, Deserialize)]
+struct CliApiErrorBody {
+    error: String,
+    code: String,
+    operation: Option<String>,
+    stage: Option<String>,
+    elapsed_ms: Option<u64>,
+    timed_out: bool,
+    restart_recommended: bool,
+}
+
+fn print_json_value(value: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn handle_page_command(
+    addr: SocketAddr,
+    command: PageCommands,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        PageCommands::Inspect => {
+            let value = serve_json_request(addr, "GET", "/page", None)?;
+            print_json_value(&value)?;
+        }
+        PageCommands::Text { scope } => {
+            let path = scoped_page_path("/page/text", scope.as_deref());
+            let value = serve_json_request(addr, "GET", &path, None)?;
+            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                println!("{text}");
+            } else {
+                print_json_value(&value)?;
+            }
+        }
+        PageCommands::Markdown { scope } => {
+            let path = scoped_page_path("/page/markdown", scope.as_deref());
+            let value = serve_json_request(addr, "GET", &path, None)?;
+            if let Some(markdown) = value.get("markdown").and_then(Value::as_str) {
+                println!("{markdown}");
+            } else {
+                print_json_value(&value)?;
+            }
+        }
+        PageCommands::Actions => {
+            let value = serve_json_request(addr, "GET", "/page/actions", None)?;
+            print_json_value(&value)?;
+        }
+        PageCommands::Forms => {
+            let value = serve_json_request(addr, "GET", "/page/forms", None)?;
+            print_json_value(&value)?;
+        }
+        PageCommands::Headings => {
+            let value = serve_json_request(addr, "GET", "/page/headings", None)?;
+            print_json_value(&value)?;
+        }
+        PageCommands::Links => {
+            let value = serve_json_request(addr, "GET", "/page/links", None)?;
+            print_json_value(&value)?;
+        }
+        PageCommands::Find { text, exact } => {
+            let value = serve_json_request(
+                addr,
+                "POST",
+                "/page/find",
+                Some(&json!({
+                    "text": text.join(" "),
+                    "exact": exact
+                })),
+            )?;
+            print_json_value(&value)?;
+        }
+        PageCommands::OpenLink {
+            text,
+            exact,
+            href_contains,
+            index,
+        } => {
+            let value = serve_json_request(
+                addr,
+                "POST",
+                "/page/open-link",
+                Some(&json!({
+                    "text": text.join(" "),
+                    "exact": exact,
+                    "href_contains": href_contains,
+                    "index": index
+                })),
+            )?;
+            print_json_value(&value)?;
+        }
+    }
+    Ok(())
+}
+
+fn scoped_page_path(base: &str, scope: Option<&str>) -> String {
+    match scope.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(scope) => format!("{base}?scope={scope}"),
+        None => base.to_string(),
+    }
+}
+
+fn serve_json_request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2))
+        .map_err(|error| {
+            format!(
+                "could not reach Aegis serve at http://{addr}: {error}. Start it with `aegis serve --addr {addr}` first."
+            )
+        })?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let body_bytes = if let Some(body) = body {
+        serde_json::to_vec(body)?
+    } else {
+        Vec::new()
+    };
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    if !body_bytes.is_empty() {
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
+    }
+    request.push_str("\r\n");
+    use std::io::{Read, Write};
+    stream.write_all(request.as_bytes())?;
+    if !body_bytes.is_empty() {
+        stream.write_all(&body_bytes)?;
+    }
+    let mut response_bytes = Vec::new();
+    stream.read_to_end(&mut response_bytes)?;
+    let header_end = response_bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or("invalid HTTP response from Aegis serve")?;
+    let (header_bytes, body_bytes) = response_bytes.split_at(header_end + 4);
+    let header_text = std::str::from_utf8(header_bytes)?;
+    let status_line = header_text
+        .lines()
+        .next()
+        .ok_or("missing HTTP status line from Aegis serve")?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or("missing HTTP status code from Aegis serve")?
+        .parse::<u16>()?;
+    let body_text = std::str::from_utf8(body_bytes)?.trim();
+    if !(200..300).contains(&status) {
+        if let Ok(error) = serde_json::from_str::<CliApiErrorBody>(body_text) {
+            let mut message = format!(
+                "Aegis API {method} {path} failed ({status}): {}",
+                error.error
+            );
+            message.push_str(&format!(" [code={}]", error.code));
+            if let Some(operation) = error.operation {
+                message.push_str(&format!("\nOperation: {operation}"));
+            }
+            if let Some(stage) = error.stage {
+                message.push_str(&format!("\nStage: {stage}"));
+            }
+            if let Some(elapsed_ms) = error.elapsed_ms {
+                message.push_str(&format!("\nElapsed: {elapsed_ms}ms"));
+            }
+            if error.timed_out || error.restart_recommended {
+                message.push_str(&format!(
+                    "\nTimed out: {}\nRestart recommended: {}",
+                    error.timed_out, error.restart_recommended
+                ));
+            }
+            return Err(message.into());
+        }
+        return Err(format!("Aegis API {method} {path} failed ({status}): {body_text}").into());
+    }
+    if body_text.is_empty() {
+        Ok(Value::Null)
+    } else {
+        Ok(serde_json::from_str(body_text)?)
+    }
 }
 
 fn handle_native_command(

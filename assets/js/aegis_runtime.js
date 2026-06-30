@@ -1294,6 +1294,365 @@
     };
   }
 
+  function pageResearchData() {
+    const title = document.title || null;
+    const url = window.location ? window.location.href : null;
+    const canonicalLink = document.querySelector("link[rel='canonical'][href]");
+    const canonicalUrl = canonicalLink ? canonicalLink.href : null;
+    const body = document.body;
+    const bodyRect = body && typeof body.getBoundingClientRect === "function"
+      ? body.getBoundingClientRect()
+      : null;
+    const bodyArea = bodyRect ? Math.max(bodyRect.width * bodyRect.height, 1) : 1;
+    const visibleText = normalizeText(body ? (body.innerText || body.textContent || "") : "");
+    const articleRoot = document.querySelector("article");
+    const mainCandidates = [
+      document.querySelector("main"),
+      document.querySelector("[role='main']"),
+      articleRoot,
+      document.querySelector(".markdown-body"),
+      document.querySelector("[data-testid='main-content']"),
+      document.querySelector(".docs-content"),
+      document.querySelector(".documentation"),
+      document.querySelector("#content")
+    ].filter((node, index, list) => !!node && list.indexOf(node) === index);
+    const contentWeight = (node) => {
+      if (!node || !isElementVisible(node)) {
+        return -1;
+      }
+      const text = normalizeText(node.innerText || node.textContent || "");
+      const rect = typeof node.getBoundingClientRect === "function"
+        ? node.getBoundingClientRect()
+        : null;
+      const areaScore = rect ? Math.min((rect.width * rect.height) / bodyArea, 1) * 300 : 0;
+      const headingScore = node.querySelectorAll ? node.querySelectorAll("h1, h2, h3").length * 80 : 0;
+      const paragraphScore = node.querySelectorAll ? node.querySelectorAll("p, li").length * 16 : 0;
+      const linkPenalty = node.querySelectorAll ? node.querySelectorAll("nav a, header a, footer a").length * 20 : 0;
+      return text.length + areaScore + headingScore + paragraphScore - linkPenalty;
+    };
+    const mainRoot = mainCandidates
+      .map((node) => ({ node, score: contentWeight(node) }))
+      .sort((left, right) => right.score - left.score)[0]?.node || null;
+    const selectorForNode = (node) => {
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+        return null;
+      }
+      if (node.id) {
+        return `#${node.id}`;
+      }
+      const tag = node.tagName ? node.tagName.toLowerCase() : "node";
+      if (node.getAttribute("role")) {
+        return `${tag}[role="${node.getAttribute("role")}"]`;
+      }
+      if (node.classList && node.classList.length > 0) {
+        return `${tag}.${Array.from(node.classList).slice(0, 2).join(".")}`;
+      }
+      return tag;
+    };
+    const inViewport = (node) => {
+      if (!node || typeof node.getBoundingClientRect !== "function") {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      return rect.bottom >= 0 &&
+        rect.right >= 0 &&
+        rect.top <= window.innerHeight &&
+        rect.left <= window.innerWidth;
+    };
+    const summarizeControl = (node, index) => {
+      if (!node || !isElementVisible(node)) {
+        return null;
+      }
+      const attrs = {};
+      if (node.attributes) {
+        for (const attr of Array.from(node.attributes)) {
+          attrs[attr.name] = attr.value;
+        }
+      }
+      const text = readNodeText(node, attrs) || "";
+      const role = implicitRole(node, attrs);
+      const controlKind = controlType(node, attrs) || role || node.tagName.toLowerCase();
+      return {
+        index,
+        kind: controlKind,
+        role,
+        text,
+        label: associatedLabel(node),
+        placeholder: attrs.placeholder || null,
+        control_type: controlType(node, attrs),
+        href: node.tagName && node.tagName.toLowerCase() === "a" ? (node.href || null) : null,
+        actions: availableActions(node, attrs),
+        disabled: !!(node.hasAttribute("disabled") || attrs["aria-disabled"] === "true"),
+        in_main_content: !!(mainRoot && mainRoot.contains(node)),
+        in_viewport: inViewport(node)
+      };
+    };
+    const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+      .map((node) => ({
+        level: Number.parseInt(node.tagName.slice(1), 10) || null,
+        text: normalizeText(node.innerText || node.textContent || ""),
+        id: node.id || null
+      }))
+      .filter((heading) => heading.text);
+    const linkNodes = Array.from(document.querySelectorAll("a[href]"))
+      .filter((node) => isElementVisible(node));
+    const links = linkNodes
+      .map((node, index) => ({
+        index,
+        text: normalizeText(node.innerText || node.textContent || node.getAttribute("aria-label") || node.title || ""),
+        href: node.href,
+        title: node.title || null
+      }))
+      .filter((link) => link.href);
+    const scoreLink = (node) => {
+      let score = 0;
+      if (mainRoot && mainRoot.contains(node)) {
+        score += 100;
+      }
+      if (inViewport(node)) {
+        score += 40;
+      }
+      score += Math.min(normalizeText(node.innerText || node.textContent || "").length, 80);
+      if (node.closest("nav, header, footer")) {
+        score -= 50;
+      }
+      return score;
+    };
+    const primaryLinks = linkNodes
+      .map((node, index) => ({ node, index, score: scoreLink(node) }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 8)
+      .map(({ node, index }) => ({
+        index,
+        text: normalizeText(node.innerText || node.textContent || node.getAttribute("aria-label") || node.title || ""),
+        href: node.href,
+        title: node.title || null
+      }))
+      .filter((link) => link.href);
+    const controlSelector = [
+      "button",
+      "input:not([type='hidden'])",
+      "textarea",
+      "select",
+      "a[href]",
+      "[role='button']",
+      "[role='link']",
+      "[role='textbox']",
+      "[role='searchbox']",
+      "[role='combobox']",
+      "[role='checkbox']",
+      "[role='radio']",
+      "[contenteditable='true']"
+    ].join(", ");
+    const controlNodes = Array.from(document.querySelectorAll(controlSelector))
+      .filter((node, index, list) => list.indexOf(node) === index);
+    const controls = controlNodes
+      .map((node, index) => summarizeControl(node, index))
+      .filter((control) => !!control);
+    const scoreControl = (control) => {
+      let score = 0;
+      if (control.in_main_content) {
+        score += 100;
+      }
+      if (control.in_viewport) {
+        score += 40;
+      }
+      if (control.kind === "searchbox" || control.kind === "submit" || control.kind === "button") {
+        score += 30;
+      }
+      score += Math.min((control.text || control.label || "").length, 60);
+      return score;
+    };
+    const primaryControls = controls
+      .slice()
+      .sort((left, right) => scoreControl(right) - scoreControl(left))
+      .slice(0, 8);
+    const forms = Array.from(document.querySelectorAll("form"))
+      .filter((node) => isElementVisible(node))
+      .map((form, index) => {
+        const formControls = Array.from(form.querySelectorAll(controlSelector))
+          .map((node, controlIndex) => summarizeControl(node, controlIndex))
+          .filter((control) => !!control && control.kind !== "link");
+        const submitLabels = formControls
+          .filter((control) => control.control_type === "submit" || control.kind === "submit" || control.kind === "button")
+          .map((control) => control.text || control.label || "")
+          .filter((value) => !!value);
+        return {
+          index,
+          id: form.id || null,
+          name: form.getAttribute("name") || null,
+          action: form.getAttribute("action") || null,
+          method: form.getAttribute("method") || null,
+          controls: formControls,
+          submit_labels: submitLabels
+        };
+      });
+    const overlayNodes = Array.from(document.querySelectorAll("body *"))
+      .filter((node) => node.nodeType === Node.ELEMENT_NODE && isElementVisible(node))
+      .filter((node) => {
+        const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+        if (!style) {
+          return false;
+        }
+        const role = (node.getAttribute("role") || "").toLowerCase();
+        const modalHint = node.getAttribute("aria-modal") === "true";
+        const text = normalizeText(node.innerText || node.textContent || "");
+        const overlayLike = style.position === "fixed" || style.position === "sticky" || role === "dialog" || role === "alertdialog" || modalHint;
+        return overlayLike && text.length >= 20;
+      });
+    const overlays = overlayNodes.slice(0, 8).map((node, index) => {
+      const text = normalizeText(node.innerText || node.textContent || "");
+      const role = (node.getAttribute("role") || "").toLowerCase();
+      const cookieLike = /cookie|consent|privacy/i.test(text);
+      const authLike = /sign in|log in|continue with|authenticate/i.test(text);
+      return {
+        index,
+        kind: role || (cookieLike ? "cookie_banner" : "overlay"),
+        text,
+        blocking: cookieLike || authLike || role === "dialog" || node.getAttribute("aria-modal") === "true",
+        dismiss_labels: Array.from(node.querySelectorAll("button, [role='button'], a[href]"))
+          .map((child) => normalizeText(child.innerText || child.textContent || child.getAttribute("aria-label") || ""))
+          .filter((value) => !!value)
+          .slice(0, 6)
+      };
+    });
+    const mainText = normalizeText(mainRoot ? (mainRoot.innerText || mainRoot.textContent || "") : "");
+    const articleText = normalizeText(articleRoot ? (articleRoot.innerText || articleRoot.textContent || "") : "");
+    const controlsText = normalizeText(
+      controls
+        .map((control) => [control.kind, control.label || "", control.text || "", control.placeholder || ""]
+          .filter((value) => !!value)
+          .join(": "))
+        .join("\n")
+    );
+    const overlayText = normalizeText(overlays.map((overlay) => overlay.text).join("\n"));
+
+    const combinedText = normalizeText(`${title || ""} ${visibleText}`);
+    const notFoundSignals = [];
+    const pushSignal = (signal) => {
+      if (!notFoundSignals.includes(signal)) {
+        notFoundSignals.push(signal);
+      }
+    };
+    if (combinedText.includes("404")) {
+      pushSignal("title_or_body_mentions_404");
+    }
+    if (combinedText.includes("page not found")) {
+      pushSignal("page_not_found_text");
+    }
+    if (combinedText.includes("not found")) {
+      pushSignal("not_found_text");
+    }
+    if (combinedText.includes("doesn't exist") || combinedText.includes("does not exist")) {
+      pushSignal("missing_page_text");
+    }
+    const blockerSignals = [];
+    const pushBlocker = (signal) => {
+      if (!blockerSignals.includes(signal)) {
+        blockerSignals.push(signal);
+      }
+    };
+    const likelyNotFound = notFoundSignals.length > 0;
+    const authWallLikely = /sign in|log in|password|continue with google|two-factor|2fa/i.test(combinedText)
+      || controls.some((control) => control.control_type === "password");
+    const blockedByOverlay = overlays.some((overlay) => overlay.blocking);
+    if (authWallLikely) {
+      pushBlocker("auth_wall_likely");
+    }
+    if (blockedByOverlay) {
+      pushBlocker("blocking_overlay_detected");
+    }
+    if (/cookie|consent|privacy/i.test(overlayText)) {
+      pushBlocker("cookie_banner_detected");
+    }
+    const usefulTextAvailable = mainText.length >= 120 || visibleText.length >= 160;
+    const interactiveElementsAvailable = controls.length > 0 || forms.length > 0;
+    const primaryHeading = headings[0] ? headings[0].text : null;
+    const pageType = likelyNotFound
+      ? "not_found"
+      : authWallLikely
+        ? "auth"
+        : /search results|results for/i.test(combinedText)
+          ? "search_results"
+          : articleText.length >= 300 || mainText.length >= 300
+            ? "documentation"
+            : forms.length > 0 && controls.some((control) => control.control_type === "password")
+              ? "login_form"
+              : controls.length >= 8 && headings.length <= 2
+                ? "dashboard"
+                : "content";
+    let suggestedSearchQuery = null;
+    if (likelyNotFound && url) {
+      try {
+        const host = new URL(url).hostname;
+        const topic = normalizeText(primaryHeading || title || "").trim();
+        suggestedSearchQuery = normalizeText(`site:${host} ${topic}`).trim() || `site:${host}`;
+      } catch (_error) {
+        suggestedSearchQuery = normalizeText(primaryHeading || title || "").trim() || null;
+      }
+    }
+    const suggestedNextActions = [];
+    if (suggestedSearchQuery) {
+      suggestedNextActions.push(`Run a recovery search for ${suggestedSearchQuery}`);
+    }
+    const searchControl = primaryControls.find((control) => control.kind === "searchbox");
+    if (searchControl) {
+      suggestedNextActions.push(
+        `Type into the search field${searchControl.label ? ` "${searchControl.label}"` : ""}`
+      );
+    }
+    if (forms.length > 0) {
+      suggestedNextActions.push("Inspect forms or fill the primary visible form");
+    }
+    if (primaryLinks[0] && primaryLinks[0].text) {
+      suggestedNextActions.push(`Open the primary link "${primaryLinks[0].text}"`);
+    }
+    if (blockedByOverlay && overlays[0] && overlays[0].dismiss_labels[0]) {
+      suggestedNextActions.push(`Dismiss the overlay via "${overlays[0].dismiss_labels[0]}"`);
+    }
+
+    return {
+      title,
+      url,
+      canonical_url: canonicalUrl,
+      visible_text: visibleText,
+      content_scopes: {
+        main_text: mainText,
+        article_text: articleText,
+        controls_text: controlsText,
+        overlay_text: overlayText
+      },
+      main_content_selector: selectorForNode(mainRoot),
+      headings,
+      links,
+      primary_links: primaryLinks,
+      controls,
+      primary_controls: primaryControls,
+      forms,
+      overlays,
+      semantic_summary: {
+        link_count: links.length,
+        control_count: controls.length,
+        form_count: forms.length,
+        overlay_count: overlays.length,
+        dialog_count: overlays.filter((overlay) => overlay.kind === "dialog" || overlay.kind === "alertdialog").length,
+        alert_count: overlays.filter((overlay) => overlay.kind === "alert").length,
+        code_block_count: document.querySelectorAll("pre, code").length,
+        table_count: document.querySelectorAll("table").length
+      },
+      page_type: pageType,
+      useful_text_available: usefulTextAvailable,
+      interactive_elements_available: interactiveElementsAvailable,
+      auth_wall_likely: authWallLikely,
+      blocked_by_overlay: blockedByOverlay,
+      blocker_signals: blockerSignals,
+      suggested_next_actions: suggestedNextActions,
+      likely_not_found: likelyNotFound,
+      not_found_signals: notFoundSignals,
+      suggested_search_query: suggestedSearchQuery
+    };
+  }
+
   function scrollIntoViewIfNeeded(el) {
     if (typeof el.scrollIntoView === "function") {
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
@@ -2416,6 +2775,7 @@
     queue,
     assignId,
     currentPageState,
+    pageResearchData,
     resolveTargetInfo,
     waitState
   };

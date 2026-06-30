@@ -179,6 +179,20 @@ Secrets rules:
 aegis --mode headful serve --addr 127.0.0.1:7878
 ```
 
+Research through a running runtime:
+
+```bash
+aegis --server-addr 127.0.0.1:7878 search shopify app review
+aegis --server-addr 127.0.0.1:7878 navigate https://shopify.dev/docs
+aegis --server-addr 127.0.0.1:7878 page inspect
+aegis --server-addr 127.0.0.1:7878 page text --scope main
+aegis --server-addr 127.0.0.1:7878 page markdown --scope article
+aegis --server-addr 127.0.0.1:7878 page actions
+aegis --server-addr 127.0.0.1:7878 page forms
+aegis --server-addr 127.0.0.1:7878 page find release an app version
+aegis --server-addr 127.0.0.1:7878 page open-link release an app version
+```
+
 For live agent debugging:
 
 - use `--mode headful` and open the dashboard at `http://127.0.0.1:7878/`
@@ -202,8 +216,18 @@ Core routes:
 - `GET /ui/bootstrap`
 - `GET /ui/chrome/state`
 - `GET /ui/vnc`
+- `POST /search`
 - `POST /navigate`
 - `POST /execute`
+- `GET /page`
+- `GET /page/text`
+- `GET /page/markdown`
+- `GET /page/actions`
+- `GET /page/forms`
+- `GET /page/links`
+- `GET /page/headings`
+- `POST /page/find`
+- `POST /page/open-link`
 - `GET /dom`
 - `GET /events`
 - `GET /session`
@@ -265,6 +289,16 @@ curl -X POST http://127.0.0.1:7878/navigate \
   -d '{"url":"https://example.com"}'
 ```
 
+### `POST /search`
+
+Run a first-class browser search without building the engine URL yourself:
+
+```bash
+curl -X POST http://127.0.0.1:7878/search \
+  -H 'content-type: application/json' \
+  -d '{"query":"shopify app review","engine":"duckduckgo"}'
+```
+
 ### `POST /execute`
 
 Run commands against the current page:
@@ -310,6 +344,28 @@ Return the current DOM snapshot:
 ```bash
 curl http://127.0.0.1:7878/dom
 ```
+
+### `GET /page*`
+
+Use the page research routes when you want semantic page reads instead of a raw DOM snapshot:
+
+```bash
+curl http://127.0.0.1:7878/page
+curl 'http://127.0.0.1:7878/page/text?scope=main'
+curl 'http://127.0.0.1:7878/page/markdown?scope=article'
+curl http://127.0.0.1:7878/page/actions
+curl http://127.0.0.1:7878/page/forms
+curl http://127.0.0.1:7878/page/links
+curl http://127.0.0.1:7878/page/headings
+```
+
+These routes expose:
+
+- focused content scopes such as `main`, `article`, `controls`, and `overlays`
+- primary links and controls ranked for likely next actions
+- form inventories for auth and submission workflows
+- blocker signals such as overlays and likely auth walls
+- direct `page find` and `page open-link` helpers for agent navigation loops
 
 ### `GET /events`
 

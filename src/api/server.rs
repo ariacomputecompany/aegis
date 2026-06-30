@@ -31,7 +31,10 @@ use crate::display::{
 use crate::dom::node::{DomNode, DomSnapshot};
 use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::host::LoadedAegisClient;
-use crate::runtime::executor::{ExecutionReport, RuntimeStatus, RuntimeTelemetrySnapshot};
+use crate::runtime::executor::{
+    ExecutionReport, PageResearchControl, PageResearchData, PageResearchForm, PageResearchHeading,
+    PageResearchLink, RuntimeStatus, RuntimeTelemetrySnapshot,
+};
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::{AegisError, BrowserChromeState};
@@ -120,6 +123,169 @@ pub struct ExecuteBody {
 #[derive(Debug, Deserialize)]
 pub struct TraceBody {
     pub path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchBody {
+    pub query: String,
+    #[serde(default)]
+    pub engine: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PageFindBody {
+    pub text: String,
+    #[serde(default)]
+    pub exact: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PageOpenLinkBody {
+    pub text: String,
+    #[serde(default)]
+    pub exact: bool,
+    #[serde(default)]
+    pub href_contains: Option<String>,
+    #[serde(default)]
+    pub index: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct PageReadQuery {
+    #[serde(default)]
+    pub tab_id: Option<u64>,
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    pub engine: String,
+    pub query: String,
+    pub url: String,
+    pub events: Vec<SequencedEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageTextResponse {
+    pub scope: String,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub text: String,
+    pub page_type: String,
+    pub useful_text_available: bool,
+    pub interactive_elements_available: bool,
+    pub blocked_by_overlay: bool,
+    pub blocker_signals: Vec<String>,
+    pub suggested_next_actions: Vec<String>,
+    pub likely_not_found: bool,
+    pub not_found_signals: Vec<String>,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageMarkdownResponse {
+    pub scope: String,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub markdown: String,
+    pub page_type: String,
+    pub useful_text_available: bool,
+    pub interactive_elements_available: bool,
+    pub blocked_by_overlay: bool,
+    pub blocker_signals: Vec<String>,
+    pub suggested_next_actions: Vec<String>,
+    pub likely_not_found: bool,
+    pub not_found_signals: Vec<String>,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageLinksResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub links: Vec<PageResearchLink>,
+    pub likely_not_found: bool,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageHeadingsResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub headings: Vec<PageResearchHeading>,
+    pub likely_not_found: bool,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageActionsResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub page_type: String,
+    pub useful_text_available: bool,
+    pub interactive_elements_available: bool,
+    pub blocked_by_overlay: bool,
+    pub blocker_signals: Vec<String>,
+    pub primary_links: Vec<PageResearchLink>,
+    pub primary_controls: Vec<PageResearchControl>,
+    pub suggested_next_actions: Vec<String>,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageFormsResponse {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub page_type: String,
+    pub auth_wall_likely: bool,
+    pub blocked_by_overlay: bool,
+    pub blocker_signals: Vec<String>,
+    pub forms: Vec<PageResearchForm>,
+    pub suggested_next_actions: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageFindMatch {
+    pub kind: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageFindResponse {
+    pub query: String,
+    pub exact: bool,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub match_count: usize,
+    pub matches: Vec<PageFindMatch>,
+    pub likely_not_found: bool,
+    pub suggested_search_query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageOpenLinkResponse {
+    pub text: String,
+    pub exact: bool,
+    pub href_contains: Option<String>,
+    pub candidate_count: usize,
+    pub chosen: PageResearchLink,
+    pub events: Vec<SequencedEvent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -476,6 +642,10 @@ pub(crate) enum ApiCommand {
         Option<u64>,
         Vec<Command>,
         oneshot::Sender<Result<ExecutionReport, AegisError>>,
+    ),
+    PageResearch(
+        Option<u64>,
+        oneshot::Sender<Result<PageResearchData, AegisError>>,
     ),
     SnapshotDom(
         Option<u64>,
@@ -1204,6 +1374,42 @@ pub async fn serve(
                     };
                     let _ = reply.send(result);
                 }
+                ApiCommand::PageResearch(requested_tab_id, reply) => {
+                    record_operation_started(
+                        &diagnostics,
+                        "page_research",
+                        "capturing structured page research snapshot",
+                    );
+                    let tab_id = tabs.resolve_tab_id(requested_tab_id);
+                    let result = match tab_id {
+                        Ok(tab_id) => {
+                            let result = tabs
+                                .tab_client_mut(tab_id)
+                                .and_then(LoadedAegisClient::page_research_data);
+                            if let Ok(client) = tabs.tab_client(tab_id) {
+                                record_operation_finished(
+                                    &diagnostics,
+                                    "page_research",
+                                    client,
+                                    &result,
+                                );
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            record_operation_failure(
+                                &diagnostics,
+                                "page_research",
+                                failure_from_error("page_research", "resolving target tab", &error),
+                                tabs.active_client()
+                                    .ok()
+                                    .map(|client| client.runtime_status()),
+                            );
+                            Err(error)
+                        }
+                    };
+                    let _ = reply.send(result);
+                }
                 ApiCommand::SnapshotDom(requested_tab_id, reply) => {
                     record_operation_started(
                         &diagnostics,
@@ -1612,6 +1818,335 @@ fn includes_normalized(haystack: Option<&str>, needle: &str) -> bool {
         .is_some_and(|haystack| haystack.contains(&normalize_text(needle)))
 }
 
+fn percent_encode(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+            output.push(ch);
+        } else if ch == ' ' {
+            output.push('+');
+        } else {
+            output.push('%');
+            output.push_str(&format!("{byte:02X}"));
+        }
+    }
+    output
+}
+
+fn search_engine_name(engine: Option<&str>) -> &'static str {
+    match engine.map(normalize_text).as_deref() {
+        Some("google") => "google",
+        Some("bing") => "bing",
+        _ => "duckduckgo",
+    }
+}
+
+fn build_search_url(query: &str, engine: Option<&str>) -> String {
+    let encoded = percent_encode(query.trim());
+    match search_engine_name(engine) {
+        "google" => format!("https://www.google.com/search?q={encoded}"),
+        "bing" => format!("https://www.bing.com/search?q={encoded}"),
+        _ => format!("https://duckduckgo.com/?q={encoded}"),
+    }
+}
+
+fn page_text_scope(page: &PageResearchData, scope: Option<&str>) -> (&'static str, String) {
+    match scope.map(normalize_text).as_deref() {
+        Some("main") => ("main", page.content_scopes.main_text.clone()),
+        Some("article") => ("article", page.content_scopes.article_text.clone()),
+        Some("controls") => ("controls", page.content_scopes.controls_text.clone()),
+        Some("overlays") => ("overlays", page.content_scopes.overlay_text.clone()),
+        _ => ("full", page.visible_text.clone()),
+    }
+}
+
+fn render_page_markdown(page: &PageResearchData, scope: Option<&str>) -> String {
+    let (scope_name, scoped_text) = page_text_scope(page, scope);
+    let mut sections = Vec::new();
+    if let Some(title) = page.title.as_ref()
+        && !title.trim().is_empty()
+    {
+        sections.push(format!("# {}", title.trim()));
+    }
+    if let Some(url) = page.url.as_ref() {
+        sections.push(format!("Source: {url}"));
+    }
+    if let Some(canonical_url) = page.canonical_url.as_ref()
+        && page.url.as_ref() != Some(canonical_url)
+    {
+        sections.push(format!("Canonical: {canonical_url}"));
+    }
+    sections.push(format!("Scope: {scope_name}"));
+    sections.push(format!("Page Type: {}", page.page_type));
+    if !page.headings.is_empty() {
+        sections.push(String::from("## Headings"));
+        sections.extend(page.headings.iter().map(|heading| {
+            let level = heading.level.unwrap_or(2).clamp(1, 6) as usize;
+            format!("{} {}", "#".repeat(level), heading.text)
+        }));
+    }
+    if !scoped_text.trim().is_empty() {
+        sections.push(format!("## {} Text", scope_name.to_ascii_uppercase()));
+        sections.push(scoped_text);
+    }
+    if !page.primary_controls.is_empty() {
+        sections.push(String::from("## Primary Controls"));
+        sections.extend(page.primary_controls.iter().map(|control| {
+            let label = control
+                .label
+                .as_deref()
+                .unwrap_or(control.text.as_str())
+                .trim();
+            let label = if label.is_empty() {
+                control.kind.as_str()
+            } else {
+                label
+            };
+            format!(
+                "- {} [{}]{}",
+                label,
+                control.kind,
+                control
+                    .placeholder
+                    .as_ref()
+                    .map(|placeholder| format!(" placeholder={placeholder}"))
+                    .unwrap_or_default()
+            )
+        }));
+    }
+    if !page.primary_links.is_empty() {
+        sections.push(String::from("## Primary Links"));
+        sections.extend(page.primary_links.iter().map(|link| {
+            let label = if link.text.trim().is_empty() {
+                link.href.clone()
+            } else {
+                link.text.clone()
+            };
+            format!("- [{label}]({})", link.href)
+        }));
+    }
+    if !page.suggested_next_actions.is_empty() {
+        sections.push(String::from("## Suggested Next Actions"));
+        sections.extend(
+            page.suggested_next_actions
+                .iter()
+                .map(|action| format!("- {action}")),
+        );
+    }
+    sections.join("\n\n")
+}
+
+fn page_text_response(page: &PageResearchData, scope: Option<&str>) -> PageTextResponse {
+    let (scope_name, text) = page_text_scope(page, scope);
+    PageTextResponse {
+        scope: scope_name.to_string(),
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        text,
+        page_type: page.page_type.clone(),
+        useful_text_available: page.useful_text_available,
+        interactive_elements_available: page.interactive_elements_available,
+        blocked_by_overlay: page.blocked_by_overlay,
+        blocker_signals: page.blocker_signals.clone(),
+        suggested_next_actions: page.suggested_next_actions.clone(),
+        likely_not_found: page.likely_not_found,
+        not_found_signals: page.not_found_signals.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }
+}
+
+fn page_markdown_response(page: &PageResearchData, scope: Option<&str>) -> PageMarkdownResponse {
+    let (scope_name, _) = page_text_scope(page, scope);
+    PageMarkdownResponse {
+        scope: scope_name.to_string(),
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        markdown: render_page_markdown(page, scope),
+        page_type: page.page_type.clone(),
+        useful_text_available: page.useful_text_available,
+        interactive_elements_available: page.interactive_elements_available,
+        blocked_by_overlay: page.blocked_by_overlay,
+        blocker_signals: page.blocker_signals.clone(),
+        suggested_next_actions: page.suggested_next_actions.clone(),
+        likely_not_found: page.likely_not_found,
+        not_found_signals: page.not_found_signals.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }
+}
+
+fn page_actions_response(page: &PageResearchData) -> PageActionsResponse {
+    PageActionsResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        page_type: page.page_type.clone(),
+        useful_text_available: page.useful_text_available,
+        interactive_elements_available: page.interactive_elements_available,
+        blocked_by_overlay: page.blocked_by_overlay,
+        blocker_signals: page.blocker_signals.clone(),
+        primary_links: page.primary_links.clone(),
+        primary_controls: page.primary_controls.clone(),
+        suggested_next_actions: page.suggested_next_actions.clone(),
+        suggested_search_query: page.suggested_search_query.clone(),
+    }
+}
+
+fn page_forms_response(page: &PageResearchData) -> PageFormsResponse {
+    PageFormsResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        page_type: page.page_type.clone(),
+        auth_wall_likely: page.auth_wall_likely,
+        blocked_by_overlay: page.blocked_by_overlay,
+        blocker_signals: page.blocker_signals.clone(),
+        forms: page.forms.clone(),
+        suggested_next_actions: page.suggested_next_actions.clone(),
+    }
+}
+
+fn snippet_for_match(text: &str, normalized_query: &str) -> Option<String> {
+    if normalized_query.is_empty() {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let start = lower.find(normalized_query)?;
+    let end = start.saturating_add(normalized_query.len());
+    let snippet_start = start.saturating_sub(80);
+    let snippet_end = (end + 80).min(text.len());
+    Some(text[snippet_start..snippet_end].trim().to_string())
+}
+
+fn page_find_matches(page: &PageResearchData, query: &str, exact: bool) -> Vec<PageFindMatch> {
+    let normalized_query = normalize_text(query);
+    if normalized_query.is_empty() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for heading in &page.headings {
+        let candidate = normalize_text(&heading.text);
+        let matched = if exact {
+            candidate == normalized_query
+        } else {
+            candidate.contains(&normalized_query)
+        };
+        if matched {
+            matches.push(PageFindMatch {
+                kind: String::from("heading"),
+                text: heading.text.clone(),
+                level: heading.level,
+                href: None,
+                index: None,
+                snippet: Some(heading.text.clone()),
+            });
+        }
+    }
+    for link in &page.links {
+        let link_text = normalize_text(&link.text);
+        let href_text = normalize_text(&link.href);
+        let matched = if exact {
+            link_text == normalized_query || href_text == normalized_query
+        } else {
+            link_text.contains(&normalized_query) || href_text.contains(&normalized_query)
+        };
+        if matched {
+            matches.push(PageFindMatch {
+                kind: String::from("link"),
+                text: if link.text.trim().is_empty() {
+                    link.href.clone()
+                } else {
+                    link.text.clone()
+                },
+                level: None,
+                href: Some(link.href.clone()),
+                index: Some(link.index),
+                snippet: link.title.clone(),
+            });
+        }
+    }
+    for control in &page.controls {
+        let control_text = normalize_text(
+            &[
+                control.label.as_deref().unwrap_or_default(),
+                control.text.as_str(),
+                control.placeholder.as_deref().unwrap_or_default(),
+                control.role.as_deref().unwrap_or_default(),
+            ]
+            .join(" "),
+        );
+        let matched = if exact {
+            control_text == normalized_query
+        } else {
+            control_text.contains(&normalized_query)
+        };
+        if matched {
+            matches.push(PageFindMatch {
+                kind: String::from("control"),
+                text: control
+                    .label
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| control.text.clone()),
+                level: None,
+                href: control.href.clone(),
+                index: Some(control.index),
+                snippet: control.placeholder.clone().or_else(|| {
+                    if control.actions.is_empty() {
+                        None
+                    } else {
+                        Some(control.actions.join(", "))
+                    }
+                }),
+            });
+        }
+    }
+    if let Some(snippet) = snippet_for_match(&page.visible_text, &normalized_query) {
+        matches.push(PageFindMatch {
+            kind: String::from("text"),
+            text: query.to_string(),
+            level: None,
+            href: None,
+            index: None,
+            snippet: Some(snippet),
+        });
+    }
+    matches
+}
+
+fn matching_links(
+    page: &PageResearchData,
+    text: &str,
+    exact: bool,
+    href_contains: Option<&str>,
+) -> Vec<PageResearchLink> {
+    let normalized_text = normalize_text(text);
+    let normalized_href = href_contains.map(normalize_text);
+    page.links
+        .iter()
+        .filter(|link| {
+            let link_text = if link.text.trim().is_empty() {
+                link.href.as_str()
+            } else {
+                link.text.as_str()
+            };
+            let link_text = normalize_text(link_text);
+            let text_matches = if exact {
+                link_text == normalized_text
+            } else {
+                link_text.contains(&normalized_text)
+            };
+            let href_matches = normalized_href
+                .as_ref()
+                .is_none_or(|needle| normalize_text(&link.href).contains(needle));
+            text_matches && href_matches
+        })
+        .cloned()
+        .collect()
+}
+
 fn origin_key(url: &str) -> String {
     let trimmed = url.trim();
     if let Some((scheme, rest)) = trimmed.split_once("://") {
@@ -1684,8 +2219,18 @@ pub fn router(state: ApiState) -> Router {
         .route("/session", post(inject_session).get(snapshot_session))
         .route("/session/save", post(save_session_profile))
         .route("/session/load", post(load_session_profile))
+        .route("/search", post(search))
         .route("/navigate", post(navigate))
         .route("/execute", post(execute))
+        .route("/page", get(page_research))
+        .route("/page/text", get(page_text))
+        .route("/page/markdown", get(page_markdown))
+        .route("/page/actions", get(page_actions))
+        .route("/page/forms", get(page_forms))
+        .route("/page/links", get(page_links))
+        .route("/page/headings", get(page_headings))
+        .route("/page/find", post(page_find))
+        .route("/page/open-link", post(page_open_link))
         .route("/dom", get(snapshot_dom))
         .route("/events", get(events))
         .route("/trace/enable", post(enable_trace))
@@ -2088,6 +2633,183 @@ async fn execute(
     ))
 }
 
+async fn snapshot_page_research(
+    state: &ApiState,
+    tab_id: Option<u64>,
+) -> Result<PageResearchData, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::PageResearch(tab_id, reply_tx))
+        .map_err(channel_error)?;
+    Ok(await_command("page_research", &state.diagnostics, reply_rx).await??)
+}
+
+async fn search(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+    Json(body): Json<SearchBody>,
+) -> Result<Json<SearchResponse>, ApiError> {
+    let request_query = body.query.trim().to_string();
+    if request_query.is_empty() {
+        return Err(ApiError::bad_request(
+            "search query must not be empty",
+            "invalid_search_query",
+        ));
+    }
+    let url = build_search_url(&request_query, body.engine.as_deref());
+    let engine = search_engine_name(body.engine.as_deref()).to_string();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::Navigate(query.tab_id, url.clone(), reply_tx))
+        .map_err(channel_error)?;
+    let events = await_command("search", &state.diagnostics, reply_rx).await??;
+    Ok(Json(SearchResponse {
+        engine,
+        query: request_query,
+        url,
+        events,
+    }))
+}
+
+async fn page_research(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+) -> Result<Json<PageResearchData>, ApiError> {
+    Ok(Json(snapshot_page_research(&state, query.tab_id).await?))
+}
+
+async fn page_text(
+    State(state): State<ApiState>,
+    Query(query): Query<PageReadQuery>,
+) -> Result<Json<PageTextResponse>, ApiError> {
+    let page = snapshot_page_research(&state, query.tab_id).await?;
+    Ok(Json(page_text_response(&page, query.scope.as_deref())))
+}
+
+async fn page_markdown(
+    State(state): State<ApiState>,
+    Query(query): Query<PageReadQuery>,
+) -> Result<Json<PageMarkdownResponse>, ApiError> {
+    let page = snapshot_page_research(&state, query.tab_id).await?;
+    Ok(Json(page_markdown_response(&page, query.scope.as_deref())))
+}
+
+async fn page_links(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+) -> Result<Json<PageLinksResponse>, ApiError> {
+    let page = snapshot_page_research(&state, query.tab_id).await?;
+    Ok(Json(PageLinksResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        links: page.links.clone(),
+        likely_not_found: page.likely_not_found,
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn page_headings(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+) -> Result<Json<PageHeadingsResponse>, ApiError> {
+    let page = snapshot_page_research(&state, query.tab_id).await?;
+    Ok(Json(PageHeadingsResponse {
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        headings: page.headings.clone(),
+        likely_not_found: page.likely_not_found,
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn page_actions(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+) -> Result<Json<PageActionsResponse>, ApiError> {
+    let page = snapshot_page_research(&state, query.tab_id).await?;
+    Ok(Json(page_actions_response(&page)))
+}
+
+async fn page_forms(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+) -> Result<Json<PageFormsResponse>, ApiError> {
+    let page = snapshot_page_research(&state, query.tab_id).await?;
+    Ok(Json(page_forms_response(&page)))
+}
+
+async fn page_find(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+    Json(body): Json<PageFindBody>,
+) -> Result<Json<PageFindResponse>, ApiError> {
+    let page = snapshot_page_research(&state, query.tab_id).await?;
+    let matches = page_find_matches(&page, &body.text, body.exact);
+    Ok(Json(PageFindResponse {
+        query: body.text,
+        exact: body.exact,
+        title: page.title.clone(),
+        url: page.url.clone(),
+        canonical_url: page.canonical_url.clone(),
+        match_count: matches.len(),
+        matches,
+        likely_not_found: page.likely_not_found,
+        suggested_search_query: page.suggested_search_query.clone(),
+    }))
+}
+
+async fn page_open_link(
+    State(state): State<ApiState>,
+    Query(query): Query<TabQuery>,
+    Json(body): Json<PageOpenLinkBody>,
+) -> Result<Json<PageOpenLinkResponse>, ApiError> {
+    let page = snapshot_page_research(&state, query.tab_id).await?;
+    let candidates = matching_links(&page, &body.text, body.exact, body.href_contains.as_deref());
+    if candidates.is_empty() {
+        return Err(ApiError::bad_request(
+            "no page links matched the requested text",
+            "page_link_not_found",
+        ));
+    }
+    let chosen = if let Some(index) = body.index {
+        candidates.get(index).cloned().ok_or_else(|| {
+            ApiError::bad_request(
+                "page link index is out of range",
+                "page_link_index_out_of_range",
+            )
+        })?
+    } else if candidates.len() == 1 {
+        candidates[0].clone()
+    } else {
+        return Err(ApiError::bad_request(
+            "multiple page links matched; pass `index` to disambiguate",
+            "page_link_ambiguous",
+        ));
+    };
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::Navigate(
+            query.tab_id,
+            chosen.href.clone(),
+            reply_tx,
+        ))
+        .map_err(channel_error)?;
+    let events = await_command("page_open_link", &state.diagnostics, reply_rx).await??;
+    Ok(Json(PageOpenLinkResponse {
+        text: body.text,
+        exact: body.exact,
+        href_contains: body.href_contains,
+        candidate_count: candidates.len(),
+        chosen,
+        events,
+    }))
+}
+
 async fn snapshot_dom(
     State(state): State<ApiState>,
     Query(query): Query<TabQuery>,
@@ -2193,6 +2915,21 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn bad_request(message: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: ApiErrorBody {
+                error: message.into(),
+                code: code.into(),
+                operation: None,
+                stage: None,
+                elapsed_ms: None,
+                timed_out: false,
+                restart_recommended: false,
+            },
+        }
+    }
+
     fn timeout(operation: &str) -> Self {
         Self {
             status: StatusCode::GATEWAY_TIMEOUT,

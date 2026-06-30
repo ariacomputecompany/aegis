@@ -11,7 +11,7 @@ use crate::client::AegisClient;
 use crate::commands::command::Command;
 use crate::dom::node::DomSnapshot;
 use crate::events::stream::{EventReadWindow, SequencedEvent};
-use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
+use crate::runtime::executor::{ExecutionReport, PageResearchData, RuntimeStatus};
 use crate::session::cookies::SessionState;
 use crate::transport::bridge::{
     AegisError, BrowserChromeState, CefBridge, HostFunctionTable, HostHandle,
@@ -130,6 +130,10 @@ impl LoadedAegisClient {
 
     pub fn snapshot_dom(&mut self) -> Result<DomSnapshot, AegisError> {
         self.client.runtime_mut().snapshot_dom()
+    }
+
+    pub fn page_research_data(&mut self) -> Result<PageResearchData, AegisError> {
+        self.client.runtime_mut().page_research_data()
     }
 
     pub fn pump(&mut self) -> Result<(), AegisError> {

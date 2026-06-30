@@ -37,6 +37,143 @@ pub struct RuntimeStatus {
     pub last_successful_bridge_roundtrip_at_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchHeading {
+    pub level: Option<u8>,
+    pub text: String,
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchLink {
+    pub index: usize,
+    pub text: String,
+    pub href: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageContentScopes {
+    #[serde(default)]
+    pub main_text: String,
+    #[serde(default)]
+    pub article_text: String,
+    #[serde(default)]
+    pub controls_text: String,
+    #[serde(default)]
+    pub overlay_text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchControl {
+    pub index: usize,
+    pub kind: String,
+    pub role: Option<String>,
+    pub text: String,
+    pub label: Option<String>,
+    pub placeholder: Option<String>,
+    pub control_type: Option<String>,
+    pub href: Option<String>,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub in_main_content: bool,
+    #[serde(default)]
+    pub in_viewport: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchForm {
+    pub index: usize,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub action: Option<String>,
+    pub method: Option<String>,
+    #[serde(default)]
+    pub controls: Vec<PageResearchControl>,
+    #[serde(default)]
+    pub submit_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchOverlay {
+    pub index: usize,
+    pub kind: String,
+    pub text: String,
+    #[serde(default)]
+    pub blocking: bool,
+    #[serde(default)]
+    pub dismiss_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageSemanticSummary {
+    #[serde(default)]
+    pub link_count: usize,
+    #[serde(default)]
+    pub control_count: usize,
+    #[serde(default)]
+    pub form_count: usize,
+    #[serde(default)]
+    pub overlay_count: usize,
+    #[serde(default)]
+    pub dialog_count: usize,
+    #[serde(default)]
+    pub alert_count: usize,
+    #[serde(default)]
+    pub code_block_count: usize,
+    #[serde(default)]
+    pub table_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageResearchData {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub canonical_url: Option<String>,
+    pub visible_text: String,
+    #[serde(default)]
+    pub content_scopes: PageContentScopes,
+    pub main_content_selector: Option<String>,
+    #[serde(default)]
+    pub headings: Vec<PageResearchHeading>,
+    #[serde(default)]
+    pub links: Vec<PageResearchLink>,
+    #[serde(default)]
+    pub primary_links: Vec<PageResearchLink>,
+    #[serde(default)]
+    pub controls: Vec<PageResearchControl>,
+    #[serde(default)]
+    pub primary_controls: Vec<PageResearchControl>,
+    #[serde(default)]
+    pub forms: Vec<PageResearchForm>,
+    #[serde(default)]
+    pub overlays: Vec<PageResearchOverlay>,
+    #[serde(default)]
+    pub semantic_summary: PageSemanticSummary,
+    #[serde(default)]
+    pub page_type: String,
+    #[serde(default)]
+    pub useful_text_available: bool,
+    #[serde(default)]
+    pub interactive_elements_available: bool,
+    #[serde(default)]
+    pub auth_wall_likely: bool,
+    #[serde(default)]
+    pub blocked_by_overlay: bool,
+    #[serde(default)]
+    pub blocker_signals: Vec<String>,
+    #[serde(default)]
+    pub suggested_next_actions: Vec<String>,
+    #[serde(default)]
+    pub likely_not_found: bool,
+    #[serde(default)]
+    pub not_found_signals: Vec<String>,
+    pub suggested_search_query: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
     pub batch_id: u64,
@@ -860,6 +997,15 @@ impl AegisRuntime {
         Ok(self.dom.snapshot())
     }
 
+    pub fn page_research_data(&mut self) -> Result<PageResearchData, AegisError> {
+        self.refresh_live_state(true)?;
+        let raw = self
+            .bridge
+            .eval_js("JSON.stringify(window.__aegis.pageResearchData())")?;
+        serde_json::from_str(&raw)
+            .map_err(|error| AegisError::Bridge(format!("page research json parse error: {error}")))
+    }
+
     pub fn event_stream(&self) -> &EventStream {
         &self.events
     }
@@ -1172,13 +1318,17 @@ impl AegisRuntime {
         Ok(true)
     }
 
-    fn resolve_live_target(&mut self, target: &CommandTarget) -> Result<LiveResolvedTarget, AegisError> {
+    fn resolve_live_target(
+        &mut self,
+        target: &CommandTarget,
+    ) -> Result<LiveResolvedTarget, AegisError> {
         let target_json = serde_json::to_string(target).map_err(AegisError::Serialize)?;
         let script =
             format!("JSON.stringify(window.__aegis.resolveTargetInfo({target_json}, null))");
         let raw = self.bridge.eval_js(&script)?;
-        let resolved: LiveResolvedTarget = serde_json::from_str(&raw)
-            .map_err(|error| AegisError::Bridge(format!("target resolution json parse error: {error}")))?;
+        let resolved: LiveResolvedTarget = serde_json::from_str(&raw).map_err(|error| {
+            AegisError::Bridge(format!("target resolution json parse error: {error}"))
+        })?;
         if resolved.matched && resolved.target_id.is_some() {
             Ok(resolved)
         } else {
