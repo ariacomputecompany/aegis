@@ -7,7 +7,6 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::command::{Command, CommandResult, CommandTarget};
-use crate::commands::matcher::{DesiredAction, resolve_command_target};
 use crate::dom::diff::DomMutation;
 use crate::dom::node::DomSnapshot;
 use crate::dom::tree::DomTree;
@@ -380,6 +379,14 @@ const RECENT_TELEMETRY_LIMIT: usize = 25;
 
 type PendingBatchFlush = (Vec<CommandResult>, Vec<SequencedEvent>, Option<DomSnapshot>);
 
+#[derive(Debug, Clone, Deserialize)]
+struct LiveResolvedTarget {
+    #[serde(default)]
+    target_id: Option<u64>,
+    #[serde(default)]
+    matched: bool,
+}
+
 impl AegisRuntime {
     pub fn new(
         bridge: CefBridge,
@@ -460,7 +467,7 @@ impl AegisRuntime {
     }
 
     pub fn execute(&mut self, commands: &[Command]) -> Result<ExecutionReport, AegisError> {
-        self.ensure_runtime_bootstrapped(self.commands_require_dom_snapshot(commands))?;
+        self.ensure_runtime_bootstrapped(false)?;
         let batch_id = self.scheduler.next_batch_id();
         let request = BatchRequest {
             batch_id,
@@ -955,25 +962,6 @@ impl AegisRuntime {
         Ok(())
     }
 
-    fn commands_require_dom_snapshot(&self, commands: &[Command]) -> bool {
-        commands.iter().any(|command| {
-            matches!(
-                command,
-                Command::Click { .. }
-                    | Command::Hover { .. }
-                    | Command::SetValue { .. }
-                    | Command::PressKey {
-                        target: Some(_),
-                        ..
-                    }
-                    | Command::WaitFor {
-                        target: Some(_),
-                        ..
-                    }
-            )
-        })
-    }
-
     fn refresh_dom_snapshot(&mut self) -> Result<(), AegisError> {
         let _ = self.drain_pending_events()?;
         let snapshot = self.bridge.snapshot_dom()?;
@@ -1045,108 +1033,45 @@ impl AegisRuntime {
             return Ok((Vec::new(), Vec::new(), None));
         }
 
-        let mut results = Vec::new();
-        let mut all_events = Vec::new();
-        let mut final_snapshot = None;
+        let mut results = vec![CommandResult::err("command not executed"); commands.len()];
+        let mut prepared_commands = Vec::new();
+        let mut prepared_positions = Vec::new();
 
-        for command in commands {
-            if self.command_target_needs_fresh_snapshot(command)
-                && let Err(error) = self.refresh_dom_snapshot()
-            {
-                results.push(CommandResult::err(error.to_string()));
-                continue;
-            }
-            let resolved = match self.resolve_command_for_bridge(command) {
-                Ok(command) => command,
-                Err(error) => {
-                    results.push(error);
-                    continue;
+        for (index, command) in commands.iter().enumerate() {
+            match self.resolve_command_for_bridge(command) {
+                Ok(command) => {
+                    prepared_positions.push(index);
+                    prepared_commands.push(command);
                 }
-            };
-
-            let request = BatchRequest {
-                batch_id,
-                commands: vec![resolved],
-            };
-            let response = self.bridge.send_batch(&request)?;
-            results.extend(response.results.clone());
-            final_snapshot = response.snapshot.clone().or(final_snapshot);
-            let emitted_events = self.apply_response(response)?;
-            all_events.extend(emitted_events);
-            let _ = self.refresh_live_state(true);
+                Err(error) => {
+                    results[index] = error;
+                }
+            }
         }
 
-        Ok((results, all_events, final_snapshot))
-    }
+        if prepared_commands.is_empty() {
+            return Ok((results, Vec::new(), None));
+        }
 
-    fn command_target_needs_fresh_snapshot(&self, command: &Command) -> bool {
-        matches!(
-            command,
-            Command::Click {
-                target: CommandTarget::Match { .. }
-            } | Command::Hover {
-                target: CommandTarget::Match { .. }
-            } | Command::SetValue {
-                target: CommandTarget::Match { .. },
-                ..
-            } | Command::PressKey {
-                target: Some(CommandTarget::Match { .. }),
-                ..
+        let request = BatchRequest {
+            batch_id,
+            commands: prepared_commands,
+        };
+        let response = self.bridge.send_batch(&request)?;
+        let response_results = response.results.clone();
+        let final_snapshot = response.snapshot.clone();
+        let emitted_events = self.apply_response(response)?;
+        for (bridge_index, result) in response_results.into_iter().enumerate() {
+            if let Some(command_index) = prepared_positions.get(bridge_index) {
+                results[*command_index] = result;
             }
-        )
+        }
+        let _ = self.refresh_live_state(true);
+        Ok((results, emitted_events, final_snapshot))
     }
 
     fn resolve_command_for_bridge(&self, command: &Command) -> Result<Command, CommandResult> {
-        let snapshot = self.dom.snapshot();
-        match command {
-            Command::Click { target } => Ok(Command::Click {
-                target: self.resolve_target_id(&snapshot, target, Some(DesiredAction::Click))?,
-            }),
-            Command::Hover { target } => Ok(Command::Hover {
-                target: self.resolve_target_id(&snapshot, target, Some(DesiredAction::Hover))?,
-            }),
-            Command::SetValue { target, value } => Ok(Command::SetValue {
-                target: self.resolve_target_id(&snapshot, target, Some(DesiredAction::Type))?,
-                value: value.clone(),
-            }),
-            Command::PressKey {
-                target,
-                key,
-                code,
-                alt_key,
-                ctrl_key,
-                meta_key,
-                shift_key,
-            } => Ok(Command::PressKey {
-                target: target
-                    .as_ref()
-                    .map(|target| {
-                        self.resolve_target_id(&snapshot, target, Some(DesiredAction::PressKey))
-                    })
-                    .transpose()?,
-                key: key.clone(),
-                code: code.clone(),
-                alt_key: *alt_key,
-                ctrl_key: *ctrl_key,
-                meta_key: *meta_key,
-                shift_key: *shift_key,
-            }),
-            _ => Ok(command.clone()),
-        }
-    }
-
-    fn resolve_target_id(
-        &self,
-        snapshot: &DomSnapshot,
-        target: &CommandTarget,
-        action: Option<DesiredAction>,
-    ) -> Result<CommandTarget, CommandResult> {
-        match target {
-            CommandTarget::Id { .. } => Ok(target.clone()),
-            CommandTarget::Match { matcher } => resolve_command_target(snapshot, target, action)
-                .map(|node| CommandTarget::Id { id: node.id })
-                .ok_or_else(|| CommandResult::err(format!("no node matched {}", json!(matcher)))),
-        }
+        Ok(command.clone())
     }
 
     fn execute_wait_for(&mut self, command: &Command) -> Result<CommandResult, AegisError> {
@@ -1225,11 +1150,11 @@ impl AegisRuntime {
             return Ok(false);
         }
 
-        if target.is_some() || text.is_some() {
+        if text.is_some() {
             self.refresh_dom_snapshot()?;
         }
         if let Some(target) = target
-            && resolve_command_target(&self.dom.snapshot(), target, None).is_none()
+            && !self.resolve_live_target(target)?.matched
         {
             return Ok(false);
         }
@@ -1245,6 +1170,23 @@ impl AegisRuntime {
         }
 
         Ok(true)
+    }
+
+    fn resolve_live_target(&mut self, target: &CommandTarget) -> Result<LiveResolvedTarget, AegisError> {
+        let target_json = serde_json::to_string(target).map_err(AegisError::Serialize)?;
+        let script =
+            format!("JSON.stringify(window.__aegis.resolveTargetInfo({target_json}, null))");
+        let raw = self.bridge.eval_js(&script)?;
+        let resolved: LiveResolvedTarget = serde_json::from_str(&raw)
+            .map_err(|error| AegisError::Bridge(format!("target resolution json parse error: {error}")))?;
+        if resolved.matched && resolved.target_id.is_some() {
+            Ok(resolved)
+        } else {
+            Ok(LiveResolvedTarget {
+                target_id: None,
+                matched: false,
+            })
+        }
     }
 
     fn refresh_live_state(&mut self, force: bool) -> Result<(), AegisError> {

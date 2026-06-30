@@ -283,7 +283,7 @@ pub fn build_native(
     if platform == NativePlatform::Macos {
         args.push("--config".to_string());
         args.push(configuration.as_str().to_string());
-    } else if let Some(parallelism) = std::thread::available_parallelism().ok() {
+    } else if let Ok(parallelism) = std::thread::available_parallelism() {
         args.push("--parallel".to_string());
         args.push(parallelism.get().to_string());
     }
@@ -575,12 +575,8 @@ fn installed_app_dir(platform: NativePlatform) -> Option<PathBuf> {
 fn canonical_install_dir(platform: NativePlatform) -> Option<PathBuf> {
     let home = resolve_home_dir()?;
     Some(match platform {
-        NativePlatform::Macos => PathBuf::from(home).join("Applications").join("Aegis.app"),
-        NativePlatform::Linux => PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("aegis")
-            .join("Aegis"),
+        NativePlatform::Macos => home.join("Applications").join("Aegis.app"),
+        NativePlatform::Linux => home.join(".local").join("share").join("aegis").join("Aegis"),
     })
 }
 
@@ -949,9 +945,16 @@ fn path_encoding_error() -> AegisError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn linux_status_falls_back_to_workspace_host_library_without_installed_bundle() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");
@@ -979,6 +982,7 @@ mod tests {
 
     #[test]
     fn linux_doctor_reports_expected_canonical_install_paths() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");
@@ -1043,6 +1047,7 @@ mod tests {
 
     #[test]
     fn canonical_install_dir_resolves_before_first_install() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");
@@ -1056,6 +1061,15 @@ mod tests {
 
         let install_dir =
             canonical_install_dir(current_platform()).expect("install dir should resolve");
+        if install_dir.exists() {
+            if install_dir.is_dir() {
+                fs::remove_dir_all(&install_dir)
+                    .expect("existing install dir should be removable for test isolation");
+            } else {
+                fs::remove_file(&install_dir)
+                    .expect("existing install path should be removable for test isolation");
+            }
+        }
         assert!(
             !install_dir.exists(),
             "first-install destination should start absent"
@@ -1073,6 +1087,7 @@ mod tests {
 
     #[test]
     fn canonical_install_dir_falls_back_to_account_home() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let original_home = std::env::var_os("HOME");
 
         unsafe {
@@ -1098,6 +1113,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_status_prefers_bundled_host_library_for_installed_app() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");

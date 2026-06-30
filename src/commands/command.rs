@@ -30,6 +30,7 @@ pub struct CommandMatcher {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 #[serde(untagged)]
 pub enum CommandTarget {
     Id {

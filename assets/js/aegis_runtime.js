@@ -30,7 +30,15 @@
     "aria-expanded",
     "aria-pressed",
     "aria-describedby",
-    "aria-disabled"
+    "aria-disabled",
+    "aria-valuemin",
+    "aria-valuemax",
+    "aria-valuenow",
+    "data-testid",
+    "data-test-id",
+    "min",
+    "max",
+    "step"
   ]);
   const ignoredTags = new Set(["script", "style", "meta", "link", "noscript", "template"]);
   const semanticTextTags = new Set([
@@ -56,6 +64,20 @@
     "legend"
   ]);
   const semanticTextRoles = new Set(["button", "link", "textbox", "searchbox", "option", "tab", "combobox"]);
+  const mediaStateByNode = new WeakMap();
+  const mediaInstrumentedNodes = new WeakSet();
+  const pageBootstrapState = {
+    document_loaded_at_ms: null,
+    dom_mutation_count: 0,
+    dom_mutation_after_load_count: 0,
+    body_mutation_after_load_count: 0,
+    root_mutation_after_load_count: 0,
+    script_error_count: 0,
+    last_script_error: null,
+    unhandled_rejection_count: 0,
+    last_unhandled_rejection: null
+  };
+  let mediaPrototypePatched = false;
 
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -69,8 +91,503 @@
     return {
       url: window.location ? window.location.href : null,
       title: document.title || null,
-      ready_state: document.readyState || null
+      ready_state: document.readyState || null,
+      scroll_x: Number.isFinite(window.scrollX) ? window.scrollX : 0,
+      scroll_y: Number.isFinite(window.scrollY) ? window.scrollY : 0,
+      viewport: {
+        width: Number.isFinite(window.innerWidth) ? window.innerWidth : null,
+        height: Number.isFinite(window.innerHeight) ? window.innerHeight : null
+      },
+      bootstrap: pageBootstrapDiagnostics(),
+      media: mediaDiagnostics()
     };
+  }
+
+  function documentLoaded() {
+    return document.readyState === "interactive" || document.readyState === "complete";
+  }
+
+  function markDocumentLoaded() {
+    if (documentLoaded() && !pageBootstrapState.document_loaded_at_ms) {
+      pageBootstrapState.document_loaded_at_ms = Date.now();
+    }
+  }
+
+  function rootCandidate() {
+    return document.getElementById("root")
+      || document.getElementById("app")
+      || document.querySelector("[data-reactroot]")
+      || null;
+  }
+
+  function rootSelectorName(root) {
+    if (!root) {
+      return null;
+    }
+    if (root.id) {
+      return `#${root.id}`;
+    }
+    if (root.hasAttribute && root.hasAttribute("data-reactroot")) {
+      return "[data-reactroot]";
+    }
+    return root.tagName ? root.tagName.toLowerCase() : "root";
+  }
+
+  function pageBootstrapDiagnostics() {
+    markDocumentLoaded();
+    const root = rootCandidate();
+    const body = document.body || null;
+    const pageUrl = window.location ? window.location.href : "";
+    const syntheticShellActive = pageUrl === "https://bootstrap.aegis/"
+      || pageUrl === "aegis://bootstrap/"
+      || pageUrl === "data:text/html,";
+    const bodyText = normalizeText(body && (body.innerText || body.textContent || ""));
+    const rootText = normalizeText(root && (root.innerText || root.textContent || ""));
+    const rootHtml = root && typeof root.innerHTML === "string" ? root.innerHTML.trim() : "";
+    const moduleScripts = Array.from(document.querySelectorAll("script[type='module']"));
+    const bodyDescendantCount = body && typeof body.querySelectorAll === "function"
+      ? body.querySelectorAll("*").length
+      : 0;
+    const rootChildElementCount = root && Number.isFinite(root.childElementCount)
+      ? root.childElementCount
+      : 0;
+    const document_loaded = documentLoaded();
+    const app_dom_mutated_after_load = pageBootstrapState.dom_mutation_after_load_count > 0;
+    const inspectable_dom_ready = !!(
+      !syntheticShellActive &&
+      document_loaded && (
+        bodyText.length > 0
+        || bodyDescendantCount > 3
+        || rootText.length > 0
+        || rootHtml.length > 0
+        || rootChildElementCount > 0
+        || app_dom_mutated_after_load
+      )
+    );
+    const module_scripts_present = moduleScripts.length > 0;
+    const module_bootstrap_observed = !!(
+      module_scripts_present && (
+        app_dom_mutated_after_load
+        || rootChildElementCount > 0
+        || rootText.length > 0
+        || bodyDescendantCount > 3
+      )
+    );
+    return {
+      document_loaded,
+      document_loaded_at_ms: pageBootstrapState.document_loaded_at_ms,
+      module_scripts_present,
+      module_script_count: moduleScripts.length,
+      module_script_sources: moduleScripts
+        .map((script) => script.getAttribute("src") || "<inline-module>")
+        .slice(0, 8),
+      synthetic_shell_active: syntheticShellActive,
+      root_selector: rootSelectorName(root),
+      root_present: !!root,
+      root_child_element_count: rootChildElementCount,
+      root_text_length: rootText.length,
+      root_html_length: rootHtml.length,
+      body_text_length: bodyText.length,
+      body_descendant_count: bodyDescendantCount,
+      dom_mutation_count: pageBootstrapState.dom_mutation_count,
+      app_dom_mutated_after_load,
+      body_mutation_after_load_count: pageBootstrapState.body_mutation_after_load_count,
+      root_mutation_after_load_count: pageBootstrapState.root_mutation_after_load_count,
+      module_bootstrap_observed,
+      inspectable_dom_ready,
+      script_error_count: pageBootstrapState.script_error_count,
+      last_script_error: pageBootstrapState.last_script_error,
+      unhandled_rejection_count: pageBootstrapState.unhandled_rejection_count,
+      last_unhandled_rejection: pageBootstrapState.last_unhandled_rejection
+    };
+  }
+
+  function finiteNumberOrNull(value) {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function rectSnapshot(rect) {
+    if (!rect) {
+      return null;
+    }
+    return {
+      x: finiteNumberOrNull(rect.x),
+      y: finiteNumberOrNull(rect.y),
+      left: finiteNumberOrNull(rect.left),
+      top: finiteNumberOrNull(rect.top),
+      right: finiteNumberOrNull(rect.right),
+      bottom: finiteNumberOrNull(rect.bottom),
+      width: finiteNumberOrNull(rect.width),
+      height: finiteNumberOrNull(rect.height)
+    };
+  }
+
+  function elementGeometry(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE || typeof node.getBoundingClientRect !== "function") {
+      return null;
+    }
+    return {
+      rect: rectSnapshot(node.getBoundingClientRect()),
+      client_width: finiteNumberOrNull(node.clientWidth),
+      client_height: finiteNumberOrNull(node.clientHeight),
+      scroll_width: finiteNumberOrNull(node.scrollWidth),
+      scroll_height: finiteNumberOrNull(node.scrollHeight),
+      scroll_left: finiteNumberOrNull(node.scrollLeft),
+      scroll_top: finiteNumberOrNull(node.scrollTop)
+    };
+  }
+
+  function trimArray(values, limit) {
+    if (values.length > limit) {
+      values.splice(0, values.length - limit);
+    }
+  }
+
+  function codecProbeNode(tagName) {
+    try {
+      return document.createElement(tagName);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function canPlayTypeSafe(node, mimeType) {
+    if (!node || typeof node.canPlayType !== "function") {
+      return null;
+    }
+    try {
+      const result = node.canPlayType(mimeType);
+      return typeof result === "string" ? result : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function mediaCodecSupport() {
+    const audio = codecProbeNode("audio");
+    const video = codecProbeNode("video");
+    return {
+      audio_mp4: canPlayTypeSafe(audio, "audio/mp4"),
+      audio_mp4_aac_lc: canPlayTypeSafe(audio, 'audio/mp4; codecs="mp4a.40.2"'),
+      audio_aac: canPlayTypeSafe(audio, "audio/aac"),
+      audio_mpeg: canPlayTypeSafe(audio, "audio/mpeg"),
+      audio_ogg_opus: canPlayTypeSafe(audio, 'audio/ogg; codecs="opus"'),
+      audio_wav_pcm: canPlayTypeSafe(audio, 'audio/wav; codecs="1"'),
+      video_mp4_h264_aac: canPlayTypeSafe(video, 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"')
+    };
+  }
+
+  function mediaResourceTiming(url) {
+    if (!url || !performance || typeof performance.getEntriesByName !== "function") {
+      return null;
+    }
+    const entries = performance.getEntriesByName(url);
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return null;
+    }
+    const entry = entries[entries.length - 1];
+    return {
+      initiator_type: entry.initiatorType || null,
+      transfer_size: Number.isFinite(entry.transferSize) ? entry.transferSize : null,
+      encoded_body_size: Number.isFinite(entry.encodedBodySize) ? entry.encodedBodySize : null,
+      decoded_body_size: Number.isFinite(entry.decodedBodySize) ? entry.decodedBodySize : null,
+      duration_ms: Number.isFinite(entry.duration) ? entry.duration : null,
+      response_end_ms: Number.isFinite(entry.responseEnd) ? entry.responseEnd : null
+    };
+  }
+
+  function mediaLikelyFailure(node, state, error, codecSupport, resourceTiming) {
+    if (state && state.last_play_error && /user didn't interact|user gesture|gesture/i.test(state.last_play_error)) {
+      return "autoplay_policy_blocked";
+    }
+    if (error && error.code === 4) {
+      const currentSrc = String(node.currentSrc || node.src || "").toLowerCase();
+      const looksLikeAacMp4 = currentSrc.includes(".m4a") ||
+        currentSrc.includes(".mp4") ||
+        currentSrc.includes("audio/mp4") ||
+        currentSrc.includes("mp4a") ||
+        (node instanceof HTMLAudioElement && state && state.metadata_parse_attempted && !state.loaded_metadata_count);
+      if (looksLikeAacMp4 && codecSupport && codecSupport.audio_mp4_aac_lc === "") {
+        return "embedded_runtime_missing_aac_mp4_decoder";
+      }
+      if (resourceTiming && resourceTiming.transfer_size === 0 && resourceTiming.encoded_body_size === 0) {
+        return "media_resource_timing_unavailable_or_empty";
+      }
+      return "media_format_or_decoder_rejection";
+    }
+    if (error && error.code === 2) {
+      return "media_network_failure";
+    }
+    if (error && error.code === 3) {
+      return "media_decode_failure";
+    }
+    return null;
+  }
+
+  function mediaState(node) {
+    if (!node || !(node instanceof HTMLMediaElement)) {
+      return null;
+    }
+    let state = mediaStateByNode.get(node);
+    if (!state) {
+      state = {
+        play_attempts: 0,
+        play_resolved: 0,
+        play_rejected: 0,
+        pause_calls: 0,
+        load_calls: 0,
+        loaded_metadata_count: 0,
+        stalled_count: 0,
+        last_event: null,
+        recent_events: [],
+        event_timeline: [],
+        metadata_parse_attempted: false,
+        last_play_error: null
+      };
+      mediaStateByNode.set(node, state);
+    }
+    return state;
+  }
+
+  function recordMediaEvent(node, eventName, details) {
+    const state = mediaState(node);
+    if (!state) {
+      return;
+    }
+    state.last_event = eventName;
+    const atMs = Date.now();
+    const entry = `${eventName}@${atMs}`;
+    state.recent_events.push(entry);
+    trimArray(state.recent_events, 12);
+    state.event_timeline.push({
+      event: eventName,
+      at_ms: atMs,
+      ready_state: Number.isFinite(node.readyState) ? node.readyState : null,
+      network_state: Number.isFinite(node.networkState) ? node.networkState : null,
+      paused: !!node.paused,
+      current_time: Number.isFinite(node.currentTime) ? node.currentTime : null,
+      error: details && details.error ? details.error : null
+    });
+    trimArray(state.event_timeline, 32);
+    if (eventName === "loadedmetadata") {
+      state.loaded_metadata_count += 1;
+      state.metadata_parse_attempted = true;
+    }
+    if (eventName === "stalled") {
+      state.stalled_count += 1;
+    }
+    if (eventName === "loadstart" || eventName === "loadeddata" || eventName === "canplay") {
+      state.metadata_parse_attempted = true;
+    }
+    if (eventName === "play_rejected" && details && details.error) {
+      state.last_play_error = String(details.error);
+    }
+    queue.push({
+      event: {
+        type: "log",
+        level: details && details.level ? details.level : "debug",
+        message: `media:${eventName}`,
+        data: {
+          node_id: assignId(node),
+          tag: node.tagName ? node.tagName.toLowerCase() : "media",
+          current_src: node.currentSrc || node.src || null,
+          ready_state: Number.isFinite(node.readyState) ? node.readyState : null,
+          network_state: Number.isFinite(node.networkState) ? node.networkState : null,
+          paused: !!node.paused,
+          current_time: Number.isFinite(node.currentTime) ? node.currentTime : null,
+          ...(details || {})
+        }
+      }
+    });
+  }
+
+  function patchMediaPrototype() {
+    if (mediaPrototypePatched || typeof HTMLMediaElement !== "function") {
+      return;
+    }
+    mediaPrototypePatched = true;
+
+    const originalPlay = HTMLMediaElement.prototype.play;
+    const originalPause = HTMLMediaElement.prototype.pause;
+    const originalLoad = HTMLMediaElement.prototype.load;
+
+    if (typeof originalPlay === "function") {
+      HTMLMediaElement.prototype.play = function (...args) {
+        const state = mediaState(this);
+        if (state) {
+          state.play_attempts += 1;
+        }
+        recordMediaEvent(this, "play_call");
+        try {
+          const result = originalPlay.apply(this, args);
+          if (result && typeof result.then === "function") {
+            return result.then((value) => {
+              const nextState = mediaState(this);
+              if (nextState) {
+                nextState.play_resolved += 1;
+              }
+              recordMediaEvent(this, "play_resolved");
+              return value;
+            }).catch((error) => {
+              const nextState = mediaState(this);
+              if (nextState) {
+                nextState.play_rejected += 1;
+              }
+              recordMediaEvent(this, "play_rejected", {
+                level: "warn",
+                error: String(error && error.message ? error.message : error)
+              });
+              throw error;
+            });
+          }
+          return result;
+        } catch (error) {
+          const nextState = mediaState(this);
+          if (nextState) {
+            nextState.play_rejected += 1;
+          }
+          recordMediaEvent(this, "play_rejected", {
+            level: "warn",
+            error: String(error && error.message ? error.message : error)
+          });
+          throw error;
+        }
+      };
+    }
+
+    if (typeof originalPause === "function") {
+      HTMLMediaElement.prototype.pause = function (...args) {
+        const state = mediaState(this);
+        if (state) {
+          state.pause_calls += 1;
+        }
+        recordMediaEvent(this, "pause_call");
+        return originalPause.apply(this, args);
+      };
+    }
+
+    if (typeof originalLoad === "function") {
+      HTMLMediaElement.prototype.load = function (...args) {
+        const state = mediaState(this);
+        if (state) {
+          state.load_calls += 1;
+        }
+        recordMediaEvent(this, "load_call");
+        return originalLoad.apply(this, args);
+      };
+    }
+  }
+
+  function instrumentMediaNode(node) {
+    if (!node || !(node instanceof HTMLMediaElement) || mediaInstrumentedNodes.has(node)) {
+      return;
+    }
+    mediaInstrumentedNodes.add(node);
+    const state = mediaState(node);
+    if (state && node.readyState >= 1) {
+      state.loaded_metadata_count = Math.max(state.loaded_metadata_count, 1);
+      state.metadata_parse_attempted = true;
+      if (!state.last_event) {
+        state.last_event = "metadata_available";
+      }
+      state.recent_events.push(`metadata_available@${Date.now()}`);
+      trimArray(state.recent_events, 12);
+    }
+    const events = [
+      "loadstart",
+      "loadedmetadata",
+      "loadeddata",
+      "canplay",
+      "canplaythrough",
+      "play",
+      "playing",
+      "pause",
+      "seeking",
+      "seeked",
+      "stalled",
+      "waiting",
+      "suspend",
+      "progress",
+      "durationchange",
+      "timeupdate",
+      "ended",
+      "error"
+    ];
+    for (const eventName of events) {
+      node.addEventListener(eventName, () => {
+        recordMediaEvent(node, eventName, {
+          error: node.error ? `${node.error.code || "media_error"}${node.error.message ? `: ${node.error.message}` : ""}` : null
+        });
+      });
+    }
+  }
+
+  function instrumentMediaTree(root) {
+    if (!root) {
+      return;
+    }
+    if (root instanceof HTMLMediaElement) {
+      instrumentMediaNode(root);
+    }
+    if (root.querySelectorAll) {
+      for (const node of Array.from(root.querySelectorAll("video, audio"))) {
+        instrumentMediaNode(node);
+      }
+    }
+  }
+
+  function mediaDiagnostics() {
+    patchMediaPrototype();
+    instrumentMediaTree(document);
+    const codecSupport = mediaCodecSupport();
+    return Array.from(document.querySelectorAll("video, audio")).map((node, index) => {
+      const state = mediaState(node) || {};
+      const errorCode = node.error && Number.isFinite(node.error.code) ? node.error.code : null;
+      const errorMessage = node.error && node.error.message ? String(node.error.message) : null;
+      const error = node.error ? `${node.error.code || "media_error"}${node.error.message ? `: ${node.error.message}` : ""}` : null;
+      const resourceTiming = mediaResourceTiming(node.currentSrc || node.src || null);
+      const likelyFailure = mediaLikelyFailure(node, state, {
+        code: errorCode,
+        message: errorMessage
+      }, codecSupport, resourceTiming);
+      return {
+        index,
+        node_id: assignId(node),
+        tag: node.tagName.toLowerCase(),
+        current_src: node.currentSrc || node.src || null,
+        source_codec_support: codecSupport,
+        ready_state: Number.isFinite(node.readyState) ? node.readyState : null,
+        network_state: Number.isFinite(node.networkState) ? node.networkState : null,
+        duration: Number.isFinite(node.duration) ? node.duration : null,
+        paused: !!node.paused,
+        ended: !!node.ended,
+        muted: !!node.muted,
+        seeking: !!node.seeking,
+        current_time: Number.isFinite(node.currentTime) ? node.currentTime : null,
+        playback_rate: Number.isFinite(node.playbackRate) ? node.playbackRate : null,
+        volume: Number.isFinite(node.volume) ? node.volume : null,
+        loop_enabled: !!node.loop,
+        autoplay: !!node.autoplay,
+        controls: !!node.controls,
+        play_attempts: state.play_attempts || 0,
+        play_resolved: state.play_resolved || 0,
+        play_rejected: state.play_rejected || 0,
+        pause_calls: state.pause_calls || 0,
+        load_calls: state.load_calls || 0,
+        loaded_metadata_count: state.loaded_metadata_count || 0,
+        metadata_parse_attempted: !!state.metadata_parse_attempted,
+        stalled_count: state.stalled_count || 0,
+        last_event: state.last_event || null,
+        recent_events: Array.isArray(state.recent_events) ? state.recent_events.slice() : [],
+        event_timeline: Array.isArray(state.event_timeline) ? state.event_timeline.slice() : [],
+        resource_timing: resourceTiming,
+        error,
+        error_code: errorCode,
+        error_message: errorMessage,
+        likely_failure_cause: likelyFailure,
+        last_play_error: state.last_play_error || null
+      };
+    });
   }
 
   function isIgnoredNode(node) {
@@ -258,6 +775,9 @@
     if (tag === "textarea" || tag === "select") {
       return tag;
     }
+    if (tag === "video" || tag === "audio") {
+      return "media";
+    }
     if (node.isContentEditable) {
       return "textbox";
     }
@@ -295,6 +815,9 @@
     }
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement || node.isContentEditable) {
       actions.push("type", "focus", "hover", "press_key");
+    }
+    if (tag === "video" || tag === "audio") {
+      actions.push("click", "hover", "focus", "press_key");
     }
     if (tag === "label" || attrs.role || tag === "div" || tag === "span") {
       actions.push("hover");
@@ -482,7 +1005,13 @@
   }
 
   function isTargetableForAction(descriptor, action) {
-    if (!descriptor.semantic.visible || descriptor.semantic.disabled) {
+    if (descriptor.semantic.disabled) {
+      return false;
+    }
+    if (action === "set_files") {
+      return descriptor.tag === "input" && descriptor.semantic.control_type === "file";
+    }
+    if (!descriptor.semantic.visible) {
       return false;
     }
     if (action === "click") {
@@ -549,6 +1078,7 @@
 
   function exactMatch(descriptor, matcher) {
     return exactStringField(descriptor.semantic.role, matcher.role) &&
+      exactStringField(descriptor.attrs["data-testid"] || descriptor.attrs["data-test-id"], matcher.test_id) &&
       exactStringField(descriptor.semantic.name, matcher.name) &&
       exactStringField(descriptor.semantic.label, matcher.label) &&
       exactStringField(descriptor.semantic.control_type, matcher.control_type) &&
@@ -578,6 +1108,7 @@
     const exactOnly = !!matcher.exact;
     let score = 0;
     const checks = [
+      ["test_id", descriptor.attrs["data-testid"] || descriptor.attrs["data-test-id"], matcher.test_id],
       ["role", descriptor.semantic.role, matcher.role],
       ["name", descriptor.semantic.name, matcher.name],
       ["label", descriptor.semantic.label, matcher.label],
@@ -663,7 +1194,18 @@
 
     const matcher = target;
     const candidates = [];
-    for (const node of document.querySelectorAll("*")) {
+    let scopedNodes = null;
+    if (matcher.selector) {
+      try {
+        scopedNodes = Array.from(document.querySelectorAll(String(matcher.selector)));
+      } catch (error) {
+        throw new Error(`invalid selector ${JSON.stringify(matcher.selector)}: ${String(error && error.message ? error.message : error)}`);
+      }
+      if (scopedNodes.length === 0) {
+        throw new Error(`no node matched selector ${JSON.stringify(matcher.selector)}`);
+      }
+    }
+    for (const node of scopedNodes || document.querySelectorAll("*")) {
       if (isIgnoredNode(node)) {
         continue;
       }
@@ -710,6 +1252,48 @@
     };
   }
 
+  function commandTargetValue(target) {
+    if (!target || typeof target !== "object") {
+      return target;
+    }
+    if (Object.prototype.hasOwnProperty.call(target, "match")) {
+      return target.match;
+    }
+    if (Object.prototype.hasOwnProperty.call(target, "id")) {
+      return target.id;
+    }
+    return target;
+  }
+
+  function resolveTargetInfo(target, action) {
+    const resolved = resolveTarget(commandTargetValue(target), action || null);
+    return {
+      target_id: resolved.targetId,
+      matched: resolved.matched,
+      debug: resolved.debug
+    };
+  }
+
+  function waitState(selector) {
+    let selectorFound = false;
+    if (selector) {
+      try {
+        selectorFound = !!document.querySelector(selector);
+      } catch (_error) {
+        selectorFound = false;
+      }
+    }
+    const animations = typeof document.getAnimations === "function"
+      ? document.getAnimations().some((animation) => animation.playState === "running")
+      : false;
+    return {
+      scroll_x: Number.isFinite(window.scrollX) ? window.scrollX : null,
+      scroll_y: Number.isFinite(window.scrollY) ? window.scrollY : null,
+      selector_found: selectorFound,
+      animations_running: animations
+    };
+  }
+
   function scrollIntoViewIfNeeded(el) {
     if (typeof el.scrollIntoView === "function") {
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
@@ -727,41 +1311,104 @@
   }
 
   function resolveActionTarget(el, action) {
-    if ((action === "click" || action === "type") && el instanceof HTMLLabelElement && el.control) {
+    if (action === "type" && el instanceof HTMLLabelElement && el.control) {
+      return el.control;
+    }
+    if (action === "set_files" && el instanceof HTMLLabelElement && el.control) {
       return el.control;
     }
     return el;
   }
 
-  function dispatchMouseLikeEvent(el, type) {
-    el.dispatchEvent(
+  function dispatchMouseLikeEvent(el, type, init) {
+    const buttons = init && typeof init.buttons === "number"
+      ? init.buttons
+      : (type === "mouseup" || type === "mouseenter" || type === "mouseover") ? 0 : 1;
+    const accepted = el.dispatchEvent(
       new MouseEvent(type, {
         bubbles: true,
         cancelable: true,
         composed: true,
         view: window,
-        button: 0,
-        buttons: 1
+        button: init && typeof init.button === "number" ? init.button : 0,
+        buttons,
+        clientX: init && Number.isFinite(init.clientX) ? init.clientX : 0,
+        clientY: init && Number.isFinite(init.clientY) ? init.clientY : 0,
+        screenX: init && Number.isFinite(init.screenX) ? init.screenX : 0,
+        screenY: init && Number.isFinite(init.screenY) ? init.screenY : 0
       })
     );
+    return {
+      event: type,
+      target: assignId(el),
+      accepted
+    };
   }
 
-  function dispatchPointerLikeEvent(el, type) {
+  function dispatchPointerLikeEvent(el, type, init) {
     if (typeof PointerEvent !== "function") {
-      return;
+      return {
+        event: type,
+        target: assignId(el),
+        accepted: null,
+        unsupported: true
+      };
     }
-    el.dispatchEvent(
+    const buttons = init && typeof init.buttons === "number"
+      ? init.buttons
+      : (type === "pointerup" || type === "pointerenter" || type === "pointerover") ? 0 : 1;
+    const accepted = el.dispatchEvent(
       new PointerEvent(type, {
         bubbles: true,
         cancelable: true,
         composed: true,
-        pointerId: 1,
+        pointerId: init && Number.isFinite(init.pointerId) ? init.pointerId : 1,
         pointerType: "mouse",
         isPrimary: true,
-        button: 0,
-        buttons: 1
+        button: init && typeof init.button === "number" ? init.button : 0,
+        buttons,
+        clientX: init && Number.isFinite(init.clientX) ? init.clientX : 0,
+        clientY: init && Number.isFinite(init.clientY) ? init.clientY : 0,
+        screenX: init && Number.isFinite(init.screenX) ? init.screenX : 0,
+        screenY: init && Number.isFinite(init.screenY) ? init.screenY : 0
       })
     );
+    return {
+      event: type,
+      target: assignId(el),
+      accepted
+    };
+  }
+
+  function centerPoint(rect) {
+    return {
+      x: rect.left + (rect.width / 2),
+      y: rect.top + (rect.height / 2)
+    };
+  }
+
+  function dragAnchorPoint(rect, handle) {
+    if (!rect) {
+      return { x: 0, y: 0 };
+    }
+    if (handle === "start" || handle === "left") {
+      return { x: rect.left + Math.min(4, rect.width / 4), y: rect.top + (rect.height / 2) };
+    }
+    if (handle === "end" || handle === "right") {
+      return { x: rect.right - Math.min(4, rect.width / 4), y: rect.top + (rect.height / 2) };
+    }
+    return centerPoint(rect);
+  }
+
+  function pointerInit(point, pointerId, buttons) {
+    return {
+      pointerId,
+      buttons,
+      clientX: point.x,
+      clientY: point.y,
+      screenX: point.x,
+      screenY: point.y
+    };
   }
 
   function baseActionResult(resolved, el, before, after) {
@@ -782,36 +1429,209 @@
     };
   }
 
+  function closestForm(el) {
+    if (!el) {
+      return null;
+    }
+    if (el.form instanceof HTMLFormElement) {
+      return el.form;
+    }
+    return typeof el.closest === "function" ? el.closest("form") : null;
+  }
+
+  function invalidControlDiagnostics(form) {
+    if (!(form instanceof HTMLFormElement)) {
+      return [];
+    }
+    return Array.from(form.elements || [])
+      .filter((control) => control && typeof control.checkValidity === "function" && !control.checkValidity())
+      .slice(0, 8)
+      .map((control) => ({
+        tag: control.tagName ? control.tagName.toLowerCase() : null,
+        type: typeof control.getAttribute === "function" ? (control.getAttribute("type") || "").toLowerCase() || null : null,
+        name: typeof control.getAttribute === "function" ? control.getAttribute("name") || null : null,
+        id: typeof control.getAttribute === "function" ? control.getAttribute("id") || null : null,
+        label: typeof control.getAttribute === "function" ? control.getAttribute("aria-label") || null : null,
+        validation_message: control.validationMessage || null
+      }));
+  }
+
+  function formDiagnostics(form) {
+    if (!(form instanceof HTMLFormElement)) {
+      return null;
+    }
+    return {
+      present: true,
+      action: form.action || null,
+      method: (form.method || "get").toLowerCase(),
+      no_validate: !!form.noValidate,
+      check_validity: typeof form.checkValidity === "function" ? form.checkValidity() : null,
+      invalid_controls: invalidControlDiagnostics(form)
+    };
+  }
+
+  function detectAuthDiagnostics() {
+    const body = document.body;
+    const visibleText = normalizeText(body ? (body.innerText || "") : "");
+    const rawText = normalizeText(body ? (body.textContent || "") : "");
+    const signals = [];
+    const notes = [];
+    const pushSignal = (kind, message) => {
+      if (!signals.some((signal) => signal.kind === kind)) {
+        signals.push({ kind, message });
+      }
+      if (message && !notes.includes(message)) {
+        notes.push(message);
+      }
+    };
+
+    if (visibleText.includes("incorrect password") || visibleText.includes("invalid password")) {
+      pushSignal("credentials_rejected", "Incorrect password");
+    }
+    if (rawText.includes("captcha couldn't load") || rawText.includes("captcha could not load")) {
+      pushSignal("captcha_blocked", "Captcha couldn't load. Refresh the page and try again.");
+    } else if (rawText.includes("hcaptcha") || rawText.includes("recaptcha")) {
+      pushSignal("captcha_present", "Captcha elements detected in page state.");
+    }
+    if (visibleText.includes("redirected you too many times") || visibleText.includes("too many redirects")) {
+      pushSignal("redirect_loop", "The page reported too many redirects.");
+    }
+    if (visibleText.includes("upstream connect error") || visibleText.includes("connection termination")) {
+      pushSignal("upstream_failure", "The page reported an upstream connection termination.");
+    }
+
+    return {
+      signals,
+      notes
+    };
+  }
+
+  function isSubmitIntentElement(el) {
+    if (!el) {
+      return false;
+    }
+    if (el instanceof HTMLButtonElement) {
+      return (el.getAttribute("type") || "submit").toLowerCase() === "submit";
+    }
+    if (el instanceof HTMLInputElement) {
+      return ["submit", "image"].includes((el.getAttribute("type") || "").toLowerCase());
+    }
+    return false;
+  }
+
+  function trackFormSubmission(form, submitter, performAction) {
+    const beforeForm = formDiagnostics(form);
+    const submitEvent = {
+      fired: false,
+      default_prevented: false,
+      submitter_tag: submitter && submitter.tagName ? submitter.tagName.toLowerCase() : null,
+      submitter_type: submitter && typeof submitter.getAttribute === "function"
+        ? (submitter.getAttribute("type") || "").toLowerCase() || null
+        : null
+    };
+    if (!(form instanceof HTMLFormElement)) {
+      performAction();
+      return {
+        form_present: false,
+        form_before: beforeForm,
+        form_after: null,
+        submit_event: submitEvent
+      };
+    }
+
+    const submitListener = (event) => {
+      submitEvent.fired = true;
+      submitEvent.default_prevented = !!event.defaultPrevented;
+      if (event.submitter && event.submitter.tagName) {
+        submitEvent.submitter_tag = event.submitter.tagName.toLowerCase();
+        submitEvent.submitter_type = typeof event.submitter.getAttribute === "function"
+          ? (event.submitter.getAttribute("type") || "").toLowerCase() || null
+          : null;
+      }
+    };
+
+    form.addEventListener("submit", submitListener, true);
+    try {
+      performAction();
+    } finally {
+      form.removeEventListener("submit", submitListener, true);
+    }
+
+    return {
+      form_present: true,
+      form_before: beforeForm,
+      form_after: formDiagnostics(form),
+      submit_event: submitEvent
+    };
+  }
+
   function click(target) {
     const before = currentPageState();
     const resolved = resolveTarget(target, "click");
     const el = resolveActionTarget(resolved.node, "click");
+    const form = closestForm(el);
+    const rect = el.getBoundingClientRect();
+    const point = centerPoint(rect);
+    const event_debug = [];
     scrollIntoViewIfNeeded(el);
     focusIfPossible(el);
-    dispatchPointerLikeEvent(el, "pointerover");
-    dispatchMouseLikeEvent(el, "mouseover");
-    dispatchPointerLikeEvent(el, "pointermove");
-    dispatchMouseLikeEvent(el, "mousemove");
-    dispatchPointerLikeEvent(el, "pointerdown");
-    dispatchMouseLikeEvent(el, "mousedown");
-    dispatchPointerLikeEvent(el, "pointerup");
-    dispatchMouseLikeEvent(el, "mouseup");
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerover", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseover", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointermove", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousemove", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerdown", pointerInit(point, 1, 1)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousedown", pointerInit(point, 1, 1)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerup", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseup", pointerInit(point, 1, 0)));
     const type = el instanceof HTMLInputElement || el instanceof HTMLButtonElement
       ? (el.getAttribute("type") || "").toLowerCase()
       : "";
-    if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement) &&
-        (type === "submit" || type === "image") &&
-        el.form &&
-        typeof el.form.requestSubmit === "function") {
-      el.form.requestSubmit(el);
-    } else if (typeof el.click === "function") {
-      el.click();
-    } else {
-      dispatchMouseLikeEvent(el, "click");
-    }
+    let default_action = "dispatch_click";
+    const submit_tracking = trackFormSubmission(form, el, () => {
+      if (el instanceof HTMLLabelElement && typeof el.click === "function") {
+        default_action = "label_click";
+        el.click();
+      } else if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement) &&
+          (type === "submit" || type === "image") &&
+          el.form &&
+          typeof el.form.requestSubmit === "function") {
+        default_action = "request_submit";
+        el.form.requestSubmit(el);
+      } else if (typeof el.click === "function") {
+        default_action = "native_click";
+        el.click();
+      } else {
+        default_action = "dispatched_mouse_click";
+        dispatchMouseLikeEvent(el, "click");
+      }
+    });
     const after = currentPageState();
+    const auth_diagnostics = detectAuthDiagnostics();
+    queue.push({
+      event: {
+        type: "log",
+        level: "debug",
+        message: "interaction:click",
+        data: {
+          node_id: resolved.targetId,
+          tag: el.tagName.toLowerCase(),
+          before_url: before.url,
+          after_url: after.url,
+          navigation_changed: before.url !== after.url,
+          title_changed: before.title !== after.title,
+          submit_tracking,
+          auth_diagnostics
+        }
+      }
+    });
     return {
       clicked: resolved.targetId,
+      geometry_after: elementGeometry(el),
+      event_debug,
+      submit_intent: isSubmitIntentElement(el),
+      default_action,
+      submit_tracking,
+      auth_diagnostics,
       ...baseActionResult(resolved, el, before, after)
     };
   }
@@ -831,6 +1651,119 @@
       return;
     }
     el.value = value;
+  }
+
+  function emitValueMutationEvents(el, value, inputType) {
+    if (typeof InputEvent === "function") {
+      el.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          inputType: inputType || "insertText",
+          data: value == null ? null : String(value)
+        })
+      );
+    } else {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function updateTrackedElementValue(el, nextValue) {
+    const previousValue = "value" in el ? el.value : "";
+    setNativeElementValue(el, nextValue);
+    if (el._valueTracker && typeof el._valueTracker.setValue === "function") {
+      el._valueTracker.setValue(previousValue);
+    }
+    return previousValue;
+  }
+
+  function clamp(value, minimum, maximum) {
+    return Math.min(maximum, Math.max(minimum, value));
+  }
+
+  function numericAttr(el, name, fallback) {
+    const raw = el.getAttribute(name);
+    const parsed = raw == null || raw == "" ? NaN : Number(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function applyRangeDragValue(el, endPoint) {
+    if (!(el instanceof HTMLInputElement) || (el.getAttribute("type") || "").toLowerCase() !== "range") {
+      return null;
+    }
+
+    const rect = el.getBoundingClientRect();
+    if (!rect || rect.width <= 0) {
+      return null;
+    }
+
+    const min = numericAttr(el, "min", 0);
+    const max = numericAttr(el, "max", 100);
+    const stepAttr = (el.getAttribute("step") || "").toLowerCase();
+    const step = stepAttr && stepAttr !== "any" ? numericAttr(el, "step", 1) : null;
+    const ratio = clamp((endPoint.x - rect.left) / rect.width, 0, 1);
+    let next = min + ((max - min) * ratio);
+    if (step && step > 0) {
+      next = min + (Math.round((next - min) / step) * step);
+    }
+    next = clamp(next, min, max);
+
+    const normalized = step && step > 0
+      ? String(Number(next.toFixed(6)))
+      : String(next);
+    updateTrackedElementValue(el, normalized);
+    emitValueMutationEvents(el, normalized, "insertReplacementText");
+    return {
+      applied: true,
+      mode: "native_range",
+      value: normalized,
+      min,
+      max,
+      step
+    };
+  }
+
+  function dispatchDocumentPointerMove(point, pointerId, event_debug) {
+    const init = pointerInit(point, pointerId, 1);
+    event_debug.push(dispatchPointerLikeEvent(document, "pointermove", init));
+    event_debug.push(dispatchMouseLikeEvent(document, "mousemove", init));
+    if (window && typeof window.dispatchEvent === "function") {
+      event_debug.push({
+        event: "window:pointermove",
+        target: null,
+        accepted: window.dispatchEvent(new PointerEvent("pointermove", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          pointerId,
+          pointerType: "mouse",
+          isPrimary: true,
+          button: 0,
+          buttons: 1,
+          clientX: point.x,
+          clientY: point.y,
+          screenX: point.x,
+          screenY: point.y
+        }))
+      });
+      event_debug.push({
+        event: "window:mousemove",
+        target: null,
+        accepted: window.dispatchEvent(new MouseEvent("mousemove", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          button: 0,
+          buttons: 1,
+          clientX: point.x,
+          clientY: point.y,
+          screenX: point.x,
+          screenY: point.y
+        }))
+      });
+    }
   }
 
   function setValue(target, value) {
@@ -854,19 +1787,7 @@
       throw new Error(`node ${resolved.targetId} is not typeable`);
     }
 
-    if (typeof InputEvent === "function") {
-      el.dispatchEvent(
-        new InputEvent("input", {
-          bubbles: true,
-          composed: true,
-          inputType: "insertText",
-          data: String(value)
-        })
-      );
-    } else {
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+    emitValueMutationEvents(el, value, "insertText");
     const after = currentPageState();
     return {
       id: resolved.targetId,
@@ -875,20 +1796,73 @@
     };
   }
 
+  function decodeBase64(base64) {
+    const binary = atob(String(base64 || ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  }
+
+  function setFiles(target, files) {
+    const before = currentPageState();
+    const resolved = resolveTarget(target, "set_files");
+    const el = resolveActionTarget(resolved.node, "set_files");
+    if (!(el instanceof HTMLInputElement) || (el.getAttribute("type") || "").toLowerCase() !== "file") {
+      throw new Error(`node ${resolved.targetId} is not a file input`);
+    }
+    if (typeof DataTransfer !== "function") {
+      throw new Error("DataTransfer is not available in this runtime");
+    }
+    if (isElementVisible(el)) {
+      scrollIntoViewIfNeeded(el);
+      focusIfPossible(el);
+    }
+    const dataTransfer = new DataTransfer();
+    for (const file of Array.isArray(files) ? files : []) {
+      const bytes = decodeBase64(file.base64);
+      dataTransfer.items.add(new File([bytes], file.name || "upload.bin", {
+        type: file.mime_type || "application/octet-stream",
+        lastModified: Number.isFinite(file.last_modified_ms) ? file.last_modified_ms : Date.now()
+      }));
+    }
+    el.files = dataTransfer.files;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    const after = currentPageState();
+    return {
+      id: resolved.targetId,
+      file_count: el.files ? el.files.length : 0,
+      files: Array.from(el.files || []).map((file) => ({
+        name: file.name,
+        size: file.size,
+        type: file.type || null,
+        last_modified_ms: Number.isFinite(file.lastModified) ? file.lastModified : null
+      })),
+      ...baseActionResult(resolved, el, before, after)
+    };
+  }
+
   function hover(target) {
     const before = currentPageState();
     const resolved = resolveTarget(target, "hover");
     const el = resolveActionTarget(resolved.node, "hover");
+    const rect = el.getBoundingClientRect();
+    const point = centerPoint(rect);
+    const event_debug = [];
     scrollIntoViewIfNeeded(el);
-    dispatchPointerLikeEvent(el, "pointerover");
-    dispatchMouseLikeEvent(el, "mouseover");
-    dispatchPointerLikeEvent(el, "pointerenter");
-    dispatchMouseLikeEvent(el, "mouseenter");
-    dispatchPointerLikeEvent(el, "pointermove");
-    dispatchMouseLikeEvent(el, "mousemove");
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerover", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseover", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerenter", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseenter", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointermove", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousemove", pointerInit(point, 1, 0)));
     const after = currentPageState();
     return {
       hovered: resolved.targetId,
+      geometry_after: elementGeometry(el),
+      event_debug,
       ...baseActionResult(resolved, el, before, after)
     };
   }
@@ -905,7 +1879,58 @@
       metaKey: !!options.metaKey,
       shiftKey: !!options.shiftKey
     });
-    return el.dispatchEvent(event);
+    return {
+      accepted: el.dispatchEvent(event),
+      target: assignId(el),
+      event: type
+    };
+  }
+
+  function pressKeyDefaultAction(el, key, eventOptions) {
+    const normalizedKey = key === "Spacebar" || key === "Space" ? " " : key;
+    let triggeredClick = false;
+    let triggeredSubmit = false;
+    let mediaToggled = false;
+    const isSummaryElement = typeof HTMLSummaryElement === "function" && el instanceof HTMLSummaryElement;
+
+    if (normalizedKey === "Enter") {
+      if (el.form && typeof el.form.requestSubmit === "function" && !(el instanceof HTMLTextAreaElement)) {
+        el.form.requestSubmit();
+        triggeredSubmit = true;
+      } else if ((el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement || el instanceof HTMLLabelElement) && typeof el.click === "function") {
+        el.click();
+        triggeredClick = true;
+      }
+    }
+
+    if (normalizedKey === " ") {
+      if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement || el instanceof HTMLLabelElement || isSummaryElement) && typeof el.click === "function") {
+        el.click();
+        triggeredClick = true;
+      } else if (el instanceof HTMLMediaElement) {
+        if (el.paused) {
+          try {
+            el.play();
+          } catch (_error) {
+          }
+        } else {
+          el.pause();
+        }
+        mediaToggled = true;
+      }
+    }
+
+    return {
+      triggered_click: triggeredClick,
+      triggered_submit: triggeredSubmit,
+      media_toggled: mediaToggled,
+      modifiers: {
+        alt: !!eventOptions.altKey,
+        ctrl: !!eventOptions.ctrlKey,
+        meta: !!eventOptions.metaKey,
+        shift: !!eventOptions.shiftKey
+      }
+    };
   }
 
   function pressKey(target, key, options) {
@@ -929,26 +1954,73 @@
       metaKey: !!(options && options.metaKey),
       shiftKey: !!(options && options.shiftKey)
     };
+    const form = closestForm(el);
 
-    const keydownAccepted = dispatchKeyEvent(el, "keydown", eventOptions);
-    const keypressAccepted = dispatchKeyEvent(el, "keypress", eventOptions);
-    let triggeredSubmit = false;
-    if (keydownAccepted && keypressAccepted && key === "Enter") {
-      if (el.form && typeof el.form.requestSubmit === "function") {
-        el.form.requestSubmit();
-        triggeredSubmit = true;
-      } else if ((el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement) && typeof el.click === "function") {
-        el.click();
+    const event_debug = [];
+    const keydown = dispatchKeyEvent(el, "keydown", eventOptions);
+    event_debug.push(keydown);
+    const keypress = dispatchKeyEvent(el, "keypress", eventOptions);
+    event_debug.push(keypress);
+    let default_action = {
+      triggered_click: false,
+      triggered_submit: false,
+      media_toggled: false,
+      modifiers: {
+        alt: !!eventOptions.altKey,
+        ctrl: !!eventOptions.ctrlKey,
+        meta: !!eventOptions.metaKey,
+        shift: !!eventOptions.shiftKey
       }
+    };
+    let submit_tracking = {
+      form_present: false,
+      form_before: formDiagnostics(form),
+      form_after: null,
+      submit_event: {
+        fired: false,
+        default_prevented: false,
+        submitter_tag: null,
+        submitter_type: null
+      }
+    };
+    if (keydown.accepted && keypress.accepted) {
+      submit_tracking = trackFormSubmission(form, el, () => {
+        default_action = pressKeyDefaultAction(el, key, eventOptions);
+      });
     }
-    dispatchKeyEvent(el, "keyup", eventOptions);
+    event_debug.push(dispatchKeyEvent(el, "keyup", eventOptions));
     const after = currentPageState();
+    const auth_diagnostics = detectAuthDiagnostics();
+    queue.push({
+      event: {
+        type: "log",
+        level: "debug",
+        message: "interaction:press_key",
+        data: {
+          key,
+          code: eventOptions.code,
+          node_id: resolved ? resolved.targetId : assignId(el),
+          navigation_changed: before.url !== after.url,
+          title_changed: before.title !== after.title,
+          default_action,
+          submit_tracking,
+          auth_diagnostics
+        }
+      }
+    });
     return {
       key,
       code: eventOptions.code,
-      triggered_submit: triggeredSubmit,
+      triggered_submit: default_action.triggered_submit,
+      triggered_click: default_action.triggered_click,
+      media_toggled: default_action.media_toggled,
       target: resolved ? resolved.debug.chosen : null,
       matcher_debug: resolved ? resolved.debug : null,
+      event_debug,
+      default_action,
+      submit_intent: key === "Enter" && !!form,
+      submit_tracking,
+      auth_diagnostics,
       page_before: before,
       page_after: after,
       navigation_changed: before.url !== after.url,
@@ -963,18 +2035,157 @@
     return { x: window.scrollX, y: window.scrollY };
   }
 
-  function exec(commands) {
-    return commands.map((command) => {
+  function geometry(target) {
+    const resolved = resolveTarget(target, null);
+    const el = resolved.node;
+    return {
+      id: resolved.targetId,
+      tag: el.tagName.toLowerCase(),
+      target: resolved.debug.chosen,
+      matcher_debug: resolved.debug,
+      geometry: elementGeometry(el),
+      page: currentPageState()
+    };
+  }
+
+  function drag(target, options) {
+    const before = currentPageState();
+    const resolved = resolveTarget(target, "hover");
+    const el = resolveActionTarget(resolved.node, "hover");
+    scrollIntoViewIfNeeded(el);
+    focusIfPossible(el);
+
+    const startRect = el.getBoundingClientRect();
+    const startPoint = dragAnchorPoint(startRect, options && options.handle ? String(options.handle).toLowerCase() : null);
+    const endPoint = {
+      x: Number.isFinite(options && options.toX) ? options.toX : startPoint.x + (Number.isFinite(options && options.deltaX) ? options.deltaX : 0),
+      y: Number.isFinite(options && options.toY) ? options.toY : startPoint.y + (Number.isFinite(options && options.deltaY) ? options.deltaY : 0)
+    };
+    if (!Number.isFinite(endPoint.x) || !Number.isFinite(endPoint.y)) {
+      throw new Error("drag requires toX/toY or deltaX/deltaY");
+    }
+
+    const pointerId = 1;
+    const steps = Math.max(1, Math.min(60, Math.round(Number.isFinite(options && options.steps) ? options.steps : 12)));
+    const event_debug = [];
+    const beforeGeometry = elementGeometry(el);
+    const beforeValue = "value" in el ? el.value : null;
+
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerover", pointerInit(startPoint, pointerId, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseover", pointerInit(startPoint, pointerId, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointermove", pointerInit(startPoint, pointerId, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousemove", pointerInit(startPoint, pointerId, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerdown", pointerInit(startPoint, pointerId, 1)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousedown", pointerInit(startPoint, pointerId, 1)));
+    if (typeof el.setPointerCapture === "function") {
       try {
+        el.setPointerCapture(pointerId);
+        event_debug.push({ event: "setPointerCapture", target: assignId(el), accepted: true });
+      } catch (_error) {
+        event_debug.push({ event: "setPointerCapture", target: assignId(el), accepted: false });
+      }
+    }
+
+    for (let index = 1; index <= steps; index += 1) {
+      const progress = index / steps;
+      const point = {
+        x: startPoint.x + ((endPoint.x - startPoint.x) * progress),
+        y: startPoint.y + ((endPoint.y - startPoint.y) * progress)
+      };
+      const moveTarget = document.elementFromPoint(point.x, point.y) || document.body || el;
+      dispatchDocumentPointerMove(point, pointerId, event_debug);
+      if (moveTarget !== document) {
+        event_debug.push(dispatchPointerLikeEvent(moveTarget, "pointermove", pointerInit(point, pointerId, 1)));
+        event_debug.push(dispatchMouseLikeEvent(moveTarget, "mousemove", pointerInit(point, pointerId, 1)));
+      }
+      if (moveTarget !== el) {
+        event_debug.push(dispatchPointerLikeEvent(el, "pointermove", pointerInit(point, pointerId, 1)));
+        event_debug.push(dispatchMouseLikeEvent(el, "mousemove", pointerInit(point, pointerId, 1)));
+      }
+    }
+
+    const range_update = applyRangeDragValue(el, endPoint);
+
+    const releaseTarget = document.elementFromPoint(endPoint.x, endPoint.y) || document.body || el;
+    event_debug.push(dispatchPointerLikeEvent(releaseTarget, "pointerup", pointerInit(endPoint, pointerId, 0)));
+    event_debug.push(dispatchMouseLikeEvent(releaseTarget, "mouseup", pointerInit(endPoint, pointerId, 0)));
+    if (releaseTarget !== el) {
+      event_debug.push(dispatchPointerLikeEvent(el, "pointerup", pointerInit(endPoint, pointerId, 0)));
+      event_debug.push(dispatchMouseLikeEvent(el, "mouseup", pointerInit(endPoint, pointerId, 0)));
+    }
+    if (typeof el.releasePointerCapture === "function") {
+      try {
+        if (el.hasPointerCapture && el.hasPointerCapture(pointerId)) {
+          el.releasePointerCapture(pointerId);
+        }
+      } catch (_error) {
+      }
+    }
+
+    const after = currentPageState();
+    queue.push({
+      event: {
+        type: "log",
+        level: "debug",
+        message: "interaction:drag",
+        data: {
+          node_id: resolved.targetId,
+          start_point: startPoint,
+          end_point: endPoint,
+          before_scroll: { x: before.scroll_x, y: before.scroll_y },
+          after_scroll: { x: after.scroll_x, y: after.scroll_y }
+        }
+      }
+    });
+    const afterGeometry = elementGeometry(el);
+    return {
+      dragged: resolved.targetId,
+      requested: {
+        handle: options && options.handle ? options.handle : null,
+        delta_x: Number.isFinite(options && options.deltaX) ? options.deltaX : null,
+        delta_y: Number.isFinite(options && options.deltaY) ? options.deltaY : null,
+        to_x: Number.isFinite(options && options.toX) ? options.toX : null,
+        to_y: Number.isFinite(options && options.toY) ? options.toY : null,
+        steps
+      },
+      start_point: startPoint,
+      end_point: endPoint,
+      pointer_capture: typeof el.hasPointerCapture === "function" ? el.hasPointerCapture(pointerId) : null,
+      range_update,
+      value_before: beforeValue,
+      value_after: "value" in el ? el.value : null,
+      geometry_before: beforeGeometry,
+      geometry_after: afterGeometry,
+      scroll_before: { x: before.scroll_x, y: before.scroll_y },
+      scroll_after: { x: after.scroll_x, y: after.scroll_y },
+      event_debug,
+      ...baseActionResult(resolved, el, before, after)
+    };
+  }
+
+  function exec(commands) {
+    return commands.map((command, index) => {
+      const eventStart = queue.length;
+      try {
+        let result;
         switch (command.type) {
           case "click":
-            return { ok: true, value: click(command.match || command.id) };
+            result = { ok: true, value: click(command.match || command.id) };
+            break;
           case "hover":
-            return { ok: true, value: hover(command.match || command.id) };
+            result = { ok: true, value: hover(command.match || command.id) };
+            break;
           case "set_value":
-            return { ok: true, value: setValue(command.match || command.id, command.value) };
+            result = { ok: true, value: setValue(command.match || command.id, command.value) };
+            break;
+          case "set_files":
+            result = {
+              ok: true,
+              value: setFiles(command.match || command.id, command.files || [])
+            };
+            break;
           case "press_key":
-            return {
+            result = {
               ok: true,
               value: pressKey(
                 command.target ? (command.target.match || command.target.id) : null,
@@ -988,15 +2199,49 @@
                 }
               )
             };
+            break;
           case "scroll":
-            return { ok: true, value: scrollToPosition(command.x, command.y) };
+            result = { ok: true, value: scrollToPosition(command.x, command.y) };
+            break;
+          case "drag":
+            result = {
+              ok: true,
+              value: drag(command.match || command.id, {
+                deltaX: command.delta_x,
+                deltaY: command.delta_y,
+                toX: command.to_x,
+                toY: command.to_y,
+                steps: command.steps,
+                handle: command.handle
+              })
+            };
+            break;
+          case "geometry":
+            result = { ok: true, value: geometry(command.match || command.id) };
+            break;
           case "eval":
-            return { ok: true, value: Function(command.code)() };
+            result = { ok: true, value: Function(command.code)() };
+            break;
           default:
-            return { ok: false, error: `unsupported command ${command.type}` };
+            result = { ok: false, error: `unsupported command ${command.type}` };
+            break;
         }
+        const eventEnd = queue.length;
+        if (result && result.value && typeof result.value === "object" && !Array.isArray(result.value)) {
+          result.value._aegis = {
+            command_index: index,
+            event_span: {
+              start: eventStart,
+              end: eventEnd
+            }
+          };
+        }
+        return result;
       } catch (error) {
-        return { ok: false, error: String(error && error.message ? error.message : error) };
+        return {
+          ok: false,
+          error: String(error && error.message ? error.message : error)
+        };
       }
     });
   }
@@ -1059,6 +2304,33 @@
   }
 
   const observer = new MutationObserver((mutations) => {
+    markDocumentLoaded();
+    for (const mutation of mutations) {
+      if (mutation.type === "childList") {
+        for (const node of Array.from(mutation.addedNodes || [])) {
+          instrumentMediaTree(node);
+        }
+      }
+    }
+    pageBootstrapState.dom_mutation_count += mutations.length;
+    if (documentLoaded()) {
+      const body = document.body || null;
+      const root = rootCandidate();
+      pageBootstrapState.dom_mutation_after_load_count += mutations.length;
+      for (const mutation of mutations) {
+        const target = mutation.target && mutation.target.nodeType === Node.ELEMENT_NODE
+          ? mutation.target
+          : mutation.target && mutation.target.parentElement
+            ? mutation.target.parentElement
+            : null;
+        if (body && target && (target === body || body.contains(target))) {
+          pageBootstrapState.body_mutation_after_load_count += 1;
+        }
+        if (root && target && (target === root || root.contains(target))) {
+          pageBootstrapState.root_mutation_after_load_count += 1;
+        }
+      }
+    }
     const changes = mutations.flatMap(serializeMutation);
     if (changes.length > 0) {
       queue.push({
@@ -1086,6 +2358,44 @@
   }
 
   attachObserver();
+  document.addEventListener("readystatechange", markDocumentLoaded);
+  window.addEventListener("load", markDocumentLoaded, { once: true });
+  window.addEventListener("error", (event) => {
+    const target = event.target;
+    const source = target && target.tagName
+      ? `${target.tagName.toLowerCase()}:${target.getAttribute("src") || target.getAttribute("href") || ""}`
+      : event.filename || "window";
+    pageBootstrapState.script_error_count += 1;
+    pageBootstrapState.last_script_error = `${source}:${event.message || "script error"}`;
+    queue.push({
+      event: {
+        type: "log",
+        level: "warn",
+        message: "page:script_error",
+        data: {
+          source,
+          message: event.message || null
+        }
+      }
+    });
+  }, true);
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event && event.reason ? String(event.reason) : "unhandled rejection";
+    pageBootstrapState.unhandled_rejection_count += 1;
+    pageBootstrapState.last_unhandled_rejection = reason;
+    queue.push({
+      event: {
+        type: "log",
+        level: "warn",
+        message: "page:unhandled_rejection",
+        data: {
+          reason
+        }
+      }
+    });
+  });
+  patchMediaPrototype();
+  instrumentMediaTree(document);
   if (!observerAttached) {
     document.addEventListener("DOMContentLoaded", attachObserver, { once: true });
   }
@@ -1098,10 +2408,15 @@
     hover,
     pressKey,
     setValue,
+    setFiles,
     scrollToPosition,
+    drag,
+    geometry,
     drainEvents,
     queue,
     assignId,
-    currentPageState
+    currentPageState,
+    resolveTargetInfo,
+    waitState
   };
 })();

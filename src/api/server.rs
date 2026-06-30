@@ -72,6 +72,7 @@ impl ApiState {
         self.tabs_tx.borrow().clone()
     }
 
+    #[allow(clippy::result_large_err)]
     pub(crate) fn send_command(
         &self,
         command: ApiCommand,
@@ -434,10 +435,10 @@ impl BrowserTabController {
                 let tab = self.get_tab_mut(id)?;
                 tab.client.pump()?;
             }
-            if let Ok(state) = self.refresh_tab_state(id) {
-                if id == self.active_tab_id {
-                    active_chrome = Some(state);
-                }
+            if let Ok(state) = self.refresh_tab_state(id)
+                && id == self.active_tab_id
+            {
+                active_chrome = Some(state);
             }
         }
         Ok(active_chrome)
@@ -1830,6 +1831,7 @@ async fn telemetry(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn snapshot_telemetry_response(
     state: &ApiState,
     startup: &Arc<Mutex<ServeStartupMetrics>>,
@@ -2580,7 +2582,7 @@ impl ServeDiagnostics {
         let aggregate = self
             .operation_aggregates
             .entry(name.to_string())
-            .or_insert_with(OperationAggregateState::default);
+            .or_default();
         aggregate.total_count += 1;
         if success {
             aggregate.success_count += 1;

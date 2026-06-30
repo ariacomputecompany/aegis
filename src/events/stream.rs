@@ -16,6 +16,7 @@ pub enum EventType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
     DomMutation {

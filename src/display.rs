@@ -1,13 +1,21 @@
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
+#[cfg(target_os = "linux")]
+use std::net::TcpListener;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use crate::transport::bridge::AegisError;
 
+#[cfg(target_os = "linux")]
 const DISPLAY_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
 const VNC_RESOLUTION: &str = "1440x960x24";
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,11 +145,13 @@ pub fn open_dashboard(url: &str) -> Result<(), AegisError> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn bind_ephemeral_port() -> Result<u16, AegisError> {
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
     Ok(listener.local_addr()?.port())
 }
 
+#[cfg(target_os = "linux")]
 fn reserve_display_name() -> Result<String, AegisError> {
     for number in 90..200 {
         let socket = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
@@ -155,6 +165,7 @@ fn reserve_display_name() -> Result<String, AegisError> {
     ))
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_display_socket(display: &str) -> Result<(), AegisError> {
     let display_number = display.trim_start_matches(':');
     let socket = PathBuf::from(format!("/tmp/.X11-unix/X{display_number}"));
@@ -170,6 +181,7 @@ fn wait_for_display_socket(display: &str) -> Result<(), AegisError> {
     )))
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_tcp(addr: SocketAddr) -> Result<(), AegisError> {
     let deadline = Instant::now() + DISPLAY_WAIT_TIMEOUT;
     while Instant::now() < deadline {
