@@ -560,10 +560,7 @@ mod tests {
             .save_profile_secrets("shopify-clean", &serde_json::json!({}))
             .expect("profile layout should be created before locking");
         assert!(path.exists());
-        assert!(temp
-            .path()
-            .join("secrets/profiles/shopify-clean")
-            .is_dir());
+        assert!(temp.path().join("secrets/profiles/shopify-clean").is_dir());
         unsafe {
             std::env::remove_var("AEGIS_HOME");
         }

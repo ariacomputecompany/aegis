@@ -82,7 +82,7 @@ Top-level commands:
 - `examples`
 - `navigate`
 - `search`
-- `page inspect|text|markdown|headings|links|find|open-link`
+- `page inspect|text|markdown|actions|forms|headings|links|find|open-link`
 - `config get`
 - `config set`
 - `config secrets-get`
@@ -112,6 +112,7 @@ Built-in CLI guidance:
 - `aegis --help` gives the high-level command map plus quick starts
 - `aegis usage` prints the recommended production workflow
 - `aegis examples` prints copy-pasteable commands for common tasks
+- first-class workflow commands are `aegis navigate`, `aegis search`, and `aegis page ...`
 
 ## Install
 
