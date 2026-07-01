@@ -576,7 +576,11 @@ fn canonical_install_dir(platform: NativePlatform) -> Option<PathBuf> {
     let home = resolve_home_dir()?;
     Some(match platform {
         NativePlatform::Macos => home.join("Applications").join("Aegis.app"),
-        NativePlatform::Linux => home.join(".local").join("share").join("aegis").join("Aegis"),
+        NativePlatform::Linux => home
+            .join(".local")
+            .join("share")
+            .join("aegis")
+            .join("Aegis"),
     })
 }
 

@@ -80,6 +80,9 @@ Top-level commands:
 - `serve`
 - `usage`
 - `examples`
+- `navigate`
+- `search`
+- `page inspect|text|markdown|actions|forms|headings|links|find|open-link`
 - `config get`
 - `config set`
 - `config secrets-get`
@@ -102,6 +105,7 @@ Global runtime flags:
 - `--start-url <url>`
 - `--host-lib <path>`
 - `--profile <name>`
+- `--server-addr <host:port>`
 
 Built-in CLI guidance:
 

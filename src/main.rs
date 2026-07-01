@@ -97,6 +97,7 @@ enum Commands {
         engine: Option<String>,
     },
     #[command(about = "Read and act on the current page through a running Aegis serve runtime")]
+    #[command(after_help = PAGE_AFTER_HELP)]
     Page {
         #[command(subcommand)]
         command: PageCommands,
@@ -260,11 +261,32 @@ Quick starts:
   aegis --mode headful serve --addr 127.0.0.1:7878
       Start the visible browser runtime plus local HTTP API.
 
+  aegis --server-addr 127.0.0.1:7878 search shopify app review
+      Run a first-class browser search through the persistent runtime.
+
+  aegis --server-addr 127.0.0.1:7878 page actions
+      Ask Aegis what the current page is and what the best next actions are.
+
   aegis config get credentials
       Inspect credential auto-capture settings.
 
   aegis examples
       Show more end-to-end commands.";
+
+const PAGE_AFTER_HELP: &str = "\
+Workflow:
+  1. Start `aegis serve`
+  2. Run `aegis search ...` or `aegis navigate ...`
+  3. Inspect with `aegis page actions` or `aegis page text --scope main`
+  4. Continue with `aegis page open-link ...` or `aegis page find ...`
+
+Examples:
+  aegis --server-addr 127.0.0.1:7878 page inspect
+  aegis --server-addr 127.0.0.1:7878 page text --scope main
+  aegis --server-addr 127.0.0.1:7878 page markdown --scope article
+  aegis --server-addr 127.0.0.1:7878 page actions
+  aegis --server-addr 127.0.0.1:7878 page forms
+  aegis --server-addr 127.0.0.1:7878 page open-link release an app version";
 
 const USAGE_TEXT: &str = "\
 Aegis production usage

@@ -14,6 +14,7 @@ CLI guidance:
 - `aegis --help` gives the high-level command map and quick starts
 - `aegis usage` prints the recommended production workflow
 - `aegis examples` prints copy-pasteable commands for common tasks
+- first-class workflow commands are `aegis navigate`, `aegis search`, and `aegis page ...`
 
 ## Mental Model
 
@@ -43,6 +44,7 @@ Global flags:
 - `--start-url <url>`
 - `--host-lib <path>`
 - `--profile <name>`
+- `--server-addr <host:port>`
 
 Production state model:
 
