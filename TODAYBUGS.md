@@ -1,6 +1,6 @@
 # TODAYBUGS
 
-Date: August 21, 2026
+Date: August 25, 2026
 Repo: `/Users/deepsaint/Desktop/aegis`
 Scope: Bugs, DX gaps, productization risks, and usability failures identified during a real production-shaped Aegis session driving Zapier end to end.
 
@@ -1212,6 +1212,518 @@ This document starts with verified issues from the Zapier workflow audit complet
   - The route should accept the common single-string form for `type`, or the docs/manifest must stop implying a more permissive query contract than the server actually honors.
 
 ## Remaining Follow-Ups
+
+### 54. The browser surface has no zoom capability at all
+
+- Severity: `P2`
+- Surface: headful browser usability / accessibility / production-browser completeness
+- What happened:
+  - A local source pass found no zoom command, route, CLI subcommand, or native host wiring for page zoom.
+  - Searching the repo for browser zoom hooks did not reveal any use of CEF/browser zoom APIs.
+  - The headful shell supports back, forward, and reload, but there is no comparable zoom-in, zoom-out, or reset path.
+- Why this matters:
+  - Zoom is a baseline browser affordance for readability, accessibility, demos, and debugging across modern SaaS apps.
+  - Without it, users and agents lose an important recovery tool on dense UIs, high-DPI displays, and small-text enterprise products.
+  - For a product positioning itself as a serious browser runtime, complete absence of zoom is a noticeable capability gap.
+- Current assessment:
+  - This appears to be a real missing browser feature, not just a docs gap.
+
+### 55. The headful shell visually suggests tabs, but new-tab behavior is not actually implemented
+
+- Severity: `P2`
+- Surface: headful browser product completeness / affordance trust
+- What happened:
+  - The macOS browser host renders a tab strip and a visible plus button with the accessibility description `New tab`.
+  - That same button is explicitly disabled in the native UI code.
+  - The product docs also describe the supported runtime model as one browser session per runtime, reinforcing that there is no real multi-tab workflow behind the chrome.
+- Why this matters:
+  - Showing a standard browser tab affordance that cannot be used creates expectation debt immediately.
+  - Multi-tab work is a normal part of production browsing for research, auth flows, cross-checking state, and operator debugging.
+  - Even if single-session is the intentional runtime model, the current UI reads as "browser with tabs" more than "single-session agent shell."
+- Current assessment:
+  - This is a genuine product gap and also an affordance-mismatch bug: the shell advertises a browser behavior it does not actually provide.
+
+### 56. The advertised "one execute batch" model is not actually true once `wait_for` or `media_state` appear in the command list
+
+- Severity: `P1`
+- Surface: batch execution contract / runtime semantics / selling-point integrity
+- What happened:
+  - The docs describe `POST /execute` as one command batch sent through the runtime in one go.
+  - The executor does not preserve that model when a batch contains `wait_for` or `media_state`.
+  - Instead, it:
+    - flushes pending bridge commands
+    - runs `wait_for` or `media_state` separately in host-side control flow
+    - then resumes later commands in another internal flush
+  - So a single user-visible execute request can become multiple internal execution phases and multiple bridge/eval interactions.
+- Why this matters:
+  - Batch semantics are part of the product story here, not just an implementation detail.
+  - Agents may rely on "single ordered batch" as a latency, consistency, or atomicity assumption when composing action pipelines.
+  - If the runtime silently splits the batch, timing and failure behavior can diverge from what the API contract implies.
+- Evidence from source:
+  - `src/runtime/executor.rs` special-cases `Command::WaitFor` and `Command::MediaState` and flushes pending commands before and after them instead of keeping one bridge batch.
+- Current assessment:
+  - This is a real contract mismatch between the documented batch model and the implemented runtime behavior.
+
+### 57. Batch execution is fail-open: later commands still run after earlier commands fail
+
+- Severity: `P1`
+- Surface: multi-action safety / production correctness / destructive workflow risk
+- What happened:
+  - The batch path does not stop on first failure.
+  - If one command errors, the runtime still continues evaluating later commands in the same batch.
+  - There is no visible `abort_on_error`, transactional mode, or explicit partial-failure guard in the command model.
+- Why this matters:
+  - In production browser automation, a failed early step often invalidates the assumptions behind every later step.
+  - Continuing after failure can turn a recoverable targeting problem into data corruption, wrong-form submission, or interactions against the wrong page state.
+  - This is especially risky because batch execution is marketed as a strength, which encourages agents to compose more work per request.
+- Evidence from source:
+  - `assets/js/aegis_runtime.js` batch `exec(commands)` maps over every command independently and returns a result per command instead of failing fast.
+  - `native/aegis_app.cc` likewise loops over every command in the request and keeps building `results_json` even after individual command failures.
+  - `src/runtime/executor.rs` preserves per-command errors in-place but continues assembling the remainder of the batch.
+- Current assessment:
+  - This is a product-level safety gap, not merely an implementation preference.
+
+### 58. Multi-command batches lose the per-command event attribution that the executor expects for interaction diagnostics
+
+- Severity: `P1`
+- Surface: batch observability / trust in click-and-submit diagnostics
+- What happened:
+  - The browser runtime script has an `exec(commands)` helper that annotates each successful command result with `_aegis.event_span`.
+  - The Rust executor explicitly looks for that span and uses it to attribute emitted events and network activity back to the specific command.
+  - But the native `send_batch` implementation does not call `window.__aegis.exec(commands)`.
+  - It calls `window.__aegis.click(...)`, `setValue(...)`, `pressKey(...)`, `drag(...)`, and related helpers one by one directly.
+  - That means the `_aegis.event_span` metadata the executor expects is not actually present on normal multi-command native batch results.
+- Why this matters:
+  - This quietly weakens the core selling point of higher-confidence interaction diagnostics.
+  - In multi-command batches, click and keypress results can lose accurate per-command:
+    - emitted event attribution
+    - network request attribution
+    - submit outcome attribution
+    - prior-event sequencing context
+  - The system can therefore look more confident than it really is while giving under-scoped diagnostics.
+- Evidence from source:
+  - `assets/js/aegis_runtime.js` adds `_aegis.event_span` only inside `exec(commands)`.
+  - `src/runtime/executor.rs` extracts `_aegis.event_span` through `extract_command_event_span(...)`.
+  - `native/aegis_app.cc` bypasses `exec(commands)` and individually invokes helper functions per command.
+- Current assessment:
+  - This looks like a real implementation bug in the diagnostic plumbing for normal multi-command native batches.
+
+### 59. A credential-capture preflight can fail the entire execute request before any batch command runs
+
+- Severity: `P2`
+- Surface: batch reliability / unrelated feature coupling
+- What happened:
+  - For execute requests containing `set_value` or `click`, the API layer may attempt a pre-execution DOM snapshot for credential auto-store.
+  - If that snapshot call fails, the whole execute request returns the error immediately and none of the commands run.
+  - This happens even when the user’s actual goal is unrelated to credential persistence.
+- Why this matters:
+  - Batch execution should not become more fragile because an auxiliary feature wants a preflight snapshot.
+  - This couples ordinary multi-action workflows to credential-capture readiness in a way that can create surprising all-or-nothing failure.
+  - For production automation, observability or capture helpers should degrade gracefully, not block unrelated action batches outright unless explicitly required.
+- Evidence from source:
+  - `src/api/server.rs` captures a pre-execution snapshot before running matching command batches when auto-store is enabled.
+  - On snapshot failure, it records the execute failure and returns early instead of running the batch.
+- Current assessment:
+  - This is a real batch-path reliability problem caused by cross-cutting feature coupling.
+
+### 60. Trace and replay flatten multi-phase execute behavior into one synthetic batch, which can hide the real runtime shape
+
+- Severity: `P2`
+- Surface: trace fidelity / debugging accuracy / deterministic analysis
+- What happened:
+  - The executor synthesizes one `BatchResponse` and one trace record for the whole user-visible execute call.
+  - But some execute requests are internally split across:
+    - one or more bridge flushes
+    - host-side `wait_for`
+    - later bridge flushes
+  - The resulting trace loses the sub-batch boundaries and does not clearly preserve the actual execution phases that occurred.
+- Why this matters:
+  - Trace quality is part of the production confidence story.
+  - If the recorded artifact compresses a multi-phase batch into one logical response, replay and diagnosis can miss the exact point where timing, state drift, or failure semantics changed.
+  - This is especially relevant for debugging batch-action flakiness, where phase boundaries often matter.
+- Evidence from source:
+  - `src/runtime/executor.rs` builds a single synthetic `BatchResponse` at the end of `execute_command_stream(...)` even when the command stream was split internally.
+  - The trace recorder persists that synthesized request/response shape as one batch record.
+- Current assessment:
+  - This is a trace-fidelity gap that makes batch-path debugging weaker than it appears.
+
+### 61. The visible test surface does not appear to exercise real multi-command batch behavior end to end
+
+- Severity: `P2`
+- Surface: verification coverage / confidence in a flagship feature
+- What happened:
+  - The visible test coverage around batching is strong on:
+    - wire encoding
+    - protocol round-tripping
+    - trace persistence
+    - replay semantics
+  - But the source pass did not reveal equivalent end-to-end verification for the most important real batch behaviors:
+    - partial failure handling
+    - fail-fast vs continue-on-error semantics
+    - per-command event attribution in multi-command requests
+    - `wait_for` splitting behavior inside one execute request
+    - mixed command batches such as `set_value -> click -> press_key -> wait_for`
+- Why this matters:
+  - Batch execution is being treated as a major capability and selling point.
+  - If the tests mostly prove static wire shape while missing live multi-command semantics, the quality signal will overstate how safe the feature is in production.
+  - This kind of gap is exactly how subtle action-ordering bugs survive until a real SaaS workflow exposes them.
+- Evidence from source:
+  - `tests/runtime_flow.rs` strongly covers encoding/decoding and trace artifacts.
+  - The visible test pass does not show comparable end-to-end assertions for live multi-command execution semantics.
+- Current assessment:
+  - This is a verification gap around one of the product’s most important advertised behaviors.
+
+### 62. Aegis verification still behaves too much like a manual probe and not enough like a first-class acceptance layer
+
+- Severity: `P2`
+- Surface: browser verification workflow / regression confidence
+- What happened:
+  - In the pasted field report, Aegis was useful for checking rendered links, profile navigation, and credits, but the workflow still felt like:
+    - open page
+    - inspect visually
+    - maybe capture a screenshot
+    - manually decide whether the user flow "looked right"
+  - The natural workflow did not automatically produce a durable, repeatable acceptance artifact unless the operator explicitly built that around Aegis.
+- Why this matters:
+  - A serious browser verification product should not rely on operator memory or ad hoc screenshot habits for high-value flows.
+  - If the tool is strongest only as a manual inspection assistant, it underdelivers on regression confidence and repeatability.
+  - This becomes especially costly on flows that are visually convincing but semantically wrong.
+- Distinction from existing issues:
+  - This is broader than the current "high-confidence verification" gap.
+  - The problem here is not just missing assertions inside a session, but that Aegis is not yet productized as a repeatable acceptance-test layer in its own ecosystem.
+- Current assessment:
+  - This is a real productization gap around how Aegis is meant to be used for verification at scale.
+
+### 63. The repo does not appear to provide a first-class Aegis scenario suite for core browser-user flows
+
+- Severity: `P2`
+- Surface: verification product completeness / dogfooding gap
+- What happened:
+  - The pasted report highlights that Aegis is available as a live verification tool, but not as a clearly integrated regression suite for the kinds of user journeys it is supposed to validate.
+  - The current repo has strong Fozzy and runtime-test surfaces, but not an obvious first-class Aegis-owned scenario catalog for:
+    - homepage browsing
+    - route transitions
+    - profile links
+    - copy-link UX
+    - media/playback checks
+    - layout and scroll behavior
+- Why this matters:
+  - "Aegis first" is much stronger when the product can verify itself through stable, scripted browser scenarios.
+  - Without that layer, browser verification remains too dependent on one-off operator runs and local interpretation.
+  - This also weakens the credibility of Aegis as a production browser-verification system rather than just an interactive tool.
+- Distinction from existing issues:
+  - Entry `61` is about missing end-to-end semantic coverage for command batches.
+  - This issue is about missing first-class product-level scenario coverage for real browser flows.
+- Current assessment:
+  - This is a meaningful dogfooding and verification-strategy gap.
+
+### 64. Aegis verification is too vulnerable to dirty backend or cached application state
+
+- Severity: `P1`
+- Surface: browser verification truthfulness / false-confidence risk
+- What happened:
+  - The pasted report calls out a recurring problem in browser verification work:
+    - the UI can appear correct because of previously mutated backend state
+    - cached data
+    - leftover seeded content
+    - prior test/session side effects
+  - In that mode, Aegis may "verify" a page successfully even though the current migration, seed, route, or API path is actually broken.
+- Why this matters:
+  - This is a classic false-positive failure mode for browser automation.
+  - A visually correct page is not strong evidence if the environment was not freshly and deterministically prepared.
+  - Because Aegis often sits at the end of the stack, it needs stronger conventions or support for proving that the verified state came from the intended setup path.
+- Distinction from existing issues:
+  - Existing entries cover interaction confidence and persisted app state after a click.
+  - This issue is about environment cleanliness and backend truth contaminating browser verification before the interaction even begins.
+- Current assessment:
+  - This is a real verification-integrity problem and should be treated as high severity because it can create false trust in broken systems.
+
+### 65. Backend/API failures can remain invisible to Aegis when the page still renders or falls back cleanly
+
+- Severity: `P1`
+- Surface: browser verification blind spots / masked backend failure
+- What happened:
+  - The pasted report notes that Aegis did not naturally expose backend API errors unless those failures became visible in-page.
+  - If the UI:
+    - fell back silently
+    - rendered cached state
+    - partially hydrated
+    - or otherwise masked the failure
+    Aegis could produce a superficially successful browser verification result while the backend route or API contract was broken.
+- Why this matters:
+  - Browser verification alone is not enough if it cannot make backend breakage legible when the UI degrades gracefully.
+  - This can produce especially dangerous "pass" results on regressions where the user sees something plausible but the data path is wrong.
+  - A productized browser verifier should make it easier to correlate visible UI state with underlying request/error truth.
+- Distinction from existing issues:
+  - This is related to, but distinct from, missing high-confidence verification.
+  - The emphasis here is masked backend failure, not just ambiguous UI success.
+- Current assessment:
+  - This is a serious verification blind spot that can inflate trust in passing browser checks.
+
+### 66. Layout-heavy interactions such as horizontal row scrolling are still awkward to verify deterministically with Aegis
+
+- Severity: `P2`
+- Surface: visual/layout verification / scroll-state confidence
+- What happened:
+  - The pasted report specifically calls out horizontally scrolling rows, fade edges, arrow controls, and density/overlap behavior as awkward to verify "purely by eye."
+  - These UI patterns are vulnerable to:
+    - viewport-specific breakage
+    - pointer-event blocking
+    - overlay/fade interference
+    - bunching on smaller screens
+    - visually subtle regressions that are easy to miss during a manual pass
+- Why this matters:
+  - This is exactly the kind of product surface where browser verification should be strong and reproducible.
+  - If these flows still depend on visual eyeballing instead of repeatable viewport assertions and artifact capture, layout regressions are likely to slip through.
+  - It also limits Aegis’s usefulness for validating modern media-heavy or carousel-heavy frontends.
+- Distinction from existing issues:
+  - Existing entries already cover some general product discoverability and verification gaps.
+  - This one is specifically about the weak ergonomics for deterministic layout/scroll verification of visually complex browser flows.
+- Current assessment:
+  - This is a real gap in the current browser-verification workflow and worth tracking separately because layout regressions are common and expensive.
+
+### 67. `page actions` can omit the actually relevant visible controls from the primary control set
+
+- Severity: `P2`
+- Surface: page research prioritization / control discovery
+- What happened:
+  - In the reported row-scroll validation flow, `page actions` surfaced hero episode selectors and content links as primary controls.
+  - The scroll-arrow buttons that were actually needed for the verification task were not surfaced as primary controls, even though `page find "Scroll right"` could find them.
+- Why this matters:
+  - This makes control discovery inconsistent across Aegis’s own high-level page primitives.
+  - If `page actions` is meant to summarize the most relevant next steps, omitting the visible control the operator actually needs is a serious relevance failure.
+  - It is especially harmful in UI QA workflows where the purpose is not semantic page reading but validating a specific interactive affordance.
+- Evidence from source:
+  - The page-research layer clearly has enough control metadata to find such buttons.
+  - The control-ranking behavior in `assets/js/aegis_runtime.js` appears tuned toward general semantic relevance rather than task-oriented UI QA control discovery.
+- Current assessment:
+  - This is a real ranking/product bug in the `page actions` surface.
+
+### 68. Aegis exposes no clean high-level action path from found controls to actual button activation
+
+- Severity: `P1`
+- Surface: page-find/action workflow / CLI ergonomics / product completeness
+- What happened:
+  - `page find` can return repeated control matches such as `Scroll right` along with indices.
+  - But the visible CLI workflow does not expose an obvious symmetric primitive for acting on those controls the way `page open-link` acts on links.
+  - `page open-link` is link-oriented and therefore not the right tool for button controls like scroll arrows.
+  - There is no obvious high-level `page click` / `click-control` workflow in the visible CLI help.
+- Why this matters:
+  - Aegis can successfully discover a control but still leave the operator stranded with no first-class way to act on it.
+  - That creates a broken workflow loop:
+    - find
+    - inspect
+    - manually fall back to lower-level execution
+  - For production UX, discovery and action need to compose naturally.
+- Evidence from source:
+  - CLI help and docs expose `page actions`, `page find`, and `page open-link`, but not a similarly direct page-level button/control activation primitive.
+- Current assessment:
+  - This is a real control-surface gap, not just a documentation omission.
+
+### 69. Control indexing is inconsistent across `page find`, `page actions`, and the visible command surface
+
+- Severity: `P2`
+- Surface: result reuse / API ergonomics / operator trust
+- What happened:
+  - `page find` returns match indices.
+  - `page actions` returns control inventories with their own indices.
+  - But the visible high-level command surface does not make it clear how those indices are meant to be reused for direct follow-up actions.
+  - That leaves index-bearing outputs feeling informative but operationally incomplete.
+- Why this matters:
+  - Indexed outputs should make follow-up actions easier, not create ambiguity about which index belongs to which command family.
+  - In repeated-control UIs like carousels or toolbars, index reuse is often the only reliable way to target the intended instance.
+  - If index semantics are not clearly reusable, users are pushed back down to manual interpretation or low-level execute payloads.
+- Evidence from source:
+  - `PageFindMatch` includes `index`, and `PageResearchControl` is also index-based, but the visible CLI help does not expose a matching first-class action primitive that clearly consumes those indices.
+- Current assessment:
+  - This is a real API/CLI contract sharp edge and worth tracking separately from the missing click-control primitive itself.
+
+### 70. `page find` does not expose enough control-state detail for production UI QA
+
+- Severity: `P2`
+- Surface: inspection fidelity / UI QA workflow
+- What happened:
+  - The reported workflow needed to answer questions like:
+    - is this control enabled
+    - is it visible
+    - is it in viewport
+    - what role does it have
+  - But `page find` currently returns a lighter match shape centered on kind/text/snippet/index rather than the richer control-state details already present elsewhere in page research.
+- Why this matters:
+  - UI QA often depends on operational state, not just semantic match text.
+  - A match result that says "control found" is incomplete if it cannot also answer whether that control is presently actionable.
+  - This is especially important for carousel arrows, hidden controls, disabled pagination, sticky overlays, and responsive layouts.
+- Evidence from source:
+  - `PageFindMatch` is currently a slim shape.
+  - `PageResearchControl` already carries richer fields such as role, disabled state, and viewport status in the runtime data model.
+- Current assessment:
+  - This is a real inspection-surface mismatch: the data exists, but `page find` does not expose enough of it for strong UI QA workflows.
+
+### 71. `page actions` lacks filtering primitives needed for focused QA work
+
+- Severity: `P2`
+- Surface: high-level CLI usability / page research targeting
+- What happened:
+  - The reported workflow needed a way to narrow controls by text/role/scope/all-controls style filters.
+  - The visible `page actions` CLI surface is summary-oriented and does not appear to offer focused filtering such as:
+    - text filter
+    - role filter
+    - scope filter
+    - "show all controls"
+  - As a result, task-specific controls can be buried or omitted by the summarization/ranking layer.
+- Why this matters:
+  - Browser QA and debugging often require interrogating a narrow subset of controls rather than receiving a global "most relevant" summary.
+  - Without filtering, `page actions` is less useful precisely when the page has many semantically interesting but operationally irrelevant controls.
+- Evidence from source:
+  - The visible CLI page subcommands do not expose filtering options for `page actions`.
+- Current assessment:
+  - This is a real product gap in the high-level page-inspection workflow.
+
+### 72. The CLI does not expose first-class screenshot, viewport, or assertion workflows for browser QA
+
+- Severity: `P2`
+- Surface: CLI product completeness / frontend verification ergonomics
+- What happened:
+  - The reported workflow wanted obvious primitives for:
+    - screenshots
+    - viewport sizing
+    - small assertions
+    - DOM/query checks shaped like test output
+  - The visible CLI help does not surface first-class page subcommands for screenshot capture, viewport control, or assertion-style frontend QA recipes.
+- Why this matters:
+  - These are baseline browser-verification primitives for responsive layout checks, scroll validation, modal checks, auth-state checks, and before/after comparison work.
+  - Their absence reinforces the sense that Aegis is still optimized more for manual exploratory control than for repeatable browser QA.
+  - This also compounds existing verification issues because operators must build these capabilities manually around lower-level surfaces.
+- Distinction from existing issues:
+  - Existing entries cover broad verification productization gaps.
+  - This issue is specifically about missing first-class browser-QA CLI primitives.
+- Current assessment:
+  - This is a real CLI capability gap and not just a documentation polish issue.
+
+### 73. The page-oriented CLI output is useful, but it is not shaped enough like stable test output for automation
+
+- Severity: `P2`
+- Surface: CLI automation readiness / schema stability / machine-consumption UX
+- What happened:
+  - The reported workflow found the JSON helpful, but not shaped enough like test output for clean automation.
+  - The visible page workflows also do not emphasize stable, assertion-friendly schemas for all page subcommands in a way that naturally supports production QA scripting.
+- Why this matters:
+  - Browser verification becomes much easier to automate when outputs are clearly designed for machine comparison:
+    - stable schemas
+    - predictable fields
+    - test-friendly summaries
+    - explicit pass/fail-oriented state
+  - If the outputs are primarily human-inspection oriented, teams are pushed toward ad hoc parsers and brittle wrappers.
+- Distinction from existing issues:
+  - This is narrower than the general "manual probe" complaint.
+  - The issue here is specifically that the output contract is not yet shaped like a first-class test artifact surface.
+- Current assessment:
+  - This is a real automation/DX gap worth tracking separately from missing page-level assertion commands.
+
+### 74. The HTTP control API is too hidden relative to how essential it is for real automation
+
+- Severity: `P2`
+- Surface: product discoverability / automation entrypoint clarity
+- What happened:
+  - The pasted report had to manually discover the HTTP control plane by:
+    - locating the `aegis` binary
+    - inspecting CLI help
+    - inferring that `aegis serve` exposed a local API
+    - probing `/`, `/manifest`, `/execute`, `/page`, and `/navigate`
+  - The CLI presentation remained command-oriented even though the final serious automation path depended directly on the HTTP API.
+- Why this matters:
+  - For repeatable automation and CI-style use, the HTTP API is not a side path; it is the core programmable surface.
+  - If that surface is not obvious, users waste time rediscovering the real control plane instead of using it confidently.
+  - This also makes Aegis feel more manual than it really is.
+- Distinction from existing issues:
+  - This is more specific than the general product discoverability complaint.
+  - The issue here is that the programmable API surface is under-signaled despite being essential.
+- Current assessment:
+  - This is a real DX/product-positioning gap around the primary automation interface.
+
+### 75. `/execute` value serialization is inconsistent enough that primitive returns are not trustworthy
+
+- Severity: `P1`
+- Surface: `/execute` contract correctness / automation reliability
+- What happened:
+  - The pasted report found that returning a primitive string from evaluated JS did not behave reliably enough to use directly.
+  - Wrapping the same value in an object produced a more usable result shape.
+  - That forced the automation to adopt a workaround pattern of object-wrapping simple values.
+- Why this matters:
+  - `/execute` is a foundational primitive.
+  - If strings, numbers, booleans, `null`, arrays, and objects do not round-trip consistently, test code becomes defensive and brittle immediately.
+  - A browser control substrate should not make basic return-value handling surprising.
+- Distinction from existing issues:
+  - Existing entries cover batch semantics and error handling.
+  - This one is specifically about the value contract of JS evaluation results.
+- Current assessment:
+  - This is a real correctness/DX issue in the `/execute` response contract.
+
+### 76. Async page evaluation does not clearly support awaited promise results and can collapse into `{}` silently
+
+- Severity: `P1`
+- Surface: `/execute` async semantics / runtime evaluation correctness
+- What happened:
+  - The pasted report attempted an async IIFE with awaited delays and a returned object.
+  - Aegis returned `{}` instead of the resolved payload.
+  - The operator had to split one logical async interaction into multiple synchronous execute calls with sleeps outside Aegis.
+- Why this matters:
+  - Async page evaluation is a normal need for real browser automation, especially around:
+    - delayed pointer sequences
+    - framework state settling
+    - timed DOM checks
+    - animation or transition-aware logic
+  - Returning `{}` instead of a clear resolved value or explicit unsupported-error message makes the failure mode ambiguous and time-consuming to debug.
+- Distinction from existing issues:
+  - This is related to missing wait/assert ergonomics, but it is a lower-level runtime contract bug.
+  - The problem here is not just "there is no helper," but that async eval behavior appears misleading.
+- Current assessment:
+  - This looks like a real `/execute` runtime contract bug and should be treated as high priority.
+
+### 77. Native console/network/error inspection is not exposed clearly enough as a first-class debugging surface
+
+- Severity: `P2`
+- Surface: debugging observability / browser-failure diagnosis
+- What happened:
+  - The pasted report notes that if the app had failed, there was no obvious Aegis-native path for quickly reading:
+    - browser console logs
+    - failed network requests
+    - JS errors
+    - request/response-level debugging information
+  - The automation succeeded, so this did not block the run, but it would have made failure triage much slower.
+- Why this matters:
+  - Browser verification is much more trustworthy when page failures can be correlated with console and network truth without leaving the Aegis workflow.
+  - Missing or hidden debug surfaces increase the chance that operators misdiagnose browser issues as app issues or vice versa.
+- Evidence from source:
+  - The runtime contains DevTools-network plumbing, but the visible CLI/API workflow does not make these debugging surfaces feel first-class.
+- Current assessment:
+  - This is a real observability/DX gap between what the runtime may know internally and what the user can easily access.
+
+### 78. Aegis still lacks an obvious blessed helper-library or test-runner pattern for repeatable E2E work
+
+- Severity: `P2`
+- Surface: E2E authoring ergonomics / ecosystem maturity
+- What happened:
+  - The pasted report ended up building a small custom framework around:
+    - request helpers
+    - execute wrappers
+    - polling
+    - click helpers
+    - drag helpers
+  - That means the first serious test required creating a mini client/runtime wrapper before the actual product assertions even began.
+- Why this matters:
+  - A browser automation product becomes much more useful when there is one obvious blessed path for repeatable test authorship.
+  - Without that, every user reinvents:
+    - transport wrappers
+    - wait semantics
+    - selector helpers
+    - result normalization
+  - This slows adoption and fragments best practices.
+- Distinction from existing issues:
+  - Existing entries cover missing CLI assertions and missing scenario suites.
+  - This issue is specifically about the absence of a clear helper-library/test-runner pattern for using the API directly.
+- Current assessment:
+  - This is a meaningful product-maturity gap in the Aegis testing story.
 
 - Verify install and launcher behavior end to end, especially whether the bundled CLI becomes the obvious canonical entrypoint for users and agents.
 - Keep probing credential auto-store and auto-replay on more modern login flows, because the product direction depends heavily on that path feeling automatic and trustworthy.
