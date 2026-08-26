@@ -1,6 +1,6 @@
 # TODAYBUGS
 
-Date: August 25, 2026
+Date: August 26, 2026
 Repo: `/Users/deepsaint/Desktop/aegis`
 Scope: Bugs, DX gaps, productization risks, and usability failures identified during a real production-shaped Aegis session driving Zapier end to end.
 
@@ -167,6 +167,100 @@ This document starts with verified issues from the Zapier workflow audit complet
   - If the runtime neither stores nor visibly replays credentials on revisit, the feature does not reduce operator friction.
 - Current assessment:
   - This runtime behavior is consistent with the earlier source-level concern that stored credentials have no effective automatic replay path.
+
+### 8f. Revisited sites do not surface any "credentials available" metadata back to the agent
+
+- Severity: `P1`
+- Surface: credential assist UX / runtime metadata contract
+- Evidence from source:
+  - Stored credential entries include an `origin` and secret payload in the Aegis-owned store.
+  - Current source inspection did not reveal a browser-time path that, on navigation or page load, checks the current site against saved credentials and exposes that match as agent-visible metadata.
+  - Existing credential surfaces are oriented around storage/listing, not page-time match signaling.
+- Why this matters:
+  - Even when automatic credential use is disabled, the agent still needs a clean signal that credentials already exist for the current site.
+  - Without that signal, the agent has to rediscover or guess whether login help is available.
+  - This turns a potentially strong assist feature into hidden state.
+- Current assessment:
+  - This is a real product-gap bug in the credential assist contract, not just a missing nicety.
+
+### 8g. The settings model cannot express "store and recognize credentials, but do not auto-use them"
+
+- Severity: `P1`
+- Surface: config contract / product behavior policy
+- Evidence from source:
+  - `CredentialsSettings` in [src/config_store.rs](/Users/deepsaint/Desktop/aegis/src/config_store.rs) currently exposes `auto_store`, but current source inspection did not reveal a separate `auto_use`, `auto_replay`, or similarly named replay/autofill policy toggle.
+  - That means the present config surface does not clearly distinguish:
+    - capture credentials
+    - announce credentials are available
+    - automatically inject/use credentials
+- Why this matters:
+  - The desired product behavior needs at least two distinct modes:
+    - passive recognition plus agent-visible availability when auto-use is off
+    - automatic replay/use when auto-use is on
+  - If the config model only represents storage, the product cannot cleanly implement or document those modes.
+- Current assessment:
+  - This is a real contract gap between the desired UX and the current configuration model.
+
+### 8h. The runtime has no clear page-load recognizer that binds the current site to saved credentials
+
+- Severity: `P1`
+- Surface: runtime credential matching / navigation lifecycle
+- Evidence from source:
+  - `AutoCredentialCapture` persists credentials after qualifying interactions.
+  - Current source inspection did not reveal a complementary navigation/page-load hook that evaluates the active URL against saved Aegis-owned credentials and produces a match decision at page time.
+  - `load_profile_credentials()` appears inspection-oriented rather than part of the live browser lifecycle.
+- Why this matters:
+  - Site recognition has to happen automatically during navigation if Aegis is going to:
+    - tell the agent credentials are available
+    - auto-apply them when policy allows
+    - report failures when replay does not work
+  - Without a page-load recognizer, credential storage remains disconnected from actual browsing.
+- Current assessment:
+  - This is a core implementation gap behind the broader "saved credentials do not help enough" complaint.
+
+### 8i. The product does not define or expose its site-matching policy clearly enough for saved credentials
+
+- Severity: `P2`
+- Surface: credential matching semantics / product contract
+- Evidence from source:
+  - Stored credential entries currently carry an `origin`.
+  - Current source inspection did not reveal a clearly surfaced contract for whether matching is supposed to occur by:
+    - exact origin
+    - registrable domain
+    - subdomain family
+    - some broader site-level rule
+- Why this matters:
+  - The user-facing behavior depends heavily on these semantics.
+  - Login flows routinely bounce across:
+    - `www`
+    - app subdomains
+    - auth subdomains
+    - federated or redirect-heavy paths
+  - If matching policy is implicit or too narrow, credential availability will feel random and hard to trust.
+- Current assessment:
+  - This is a real product-contract gap that should be made explicit before the credential assist story is considered production-ready.
+
+### 8j. There is no clear runtime outcome channel for credential availability, auto-use, success, or failure
+
+- Severity: `P1`
+- Surface: agent feedback / observability / login UX
+- Evidence from source:
+  - Existing source inspection did not reveal an agent-facing runtime status model that reports events such as:
+    - credentials available for this site
+    - credentials auto-applied
+    - credentials withheld because auto-use is disabled
+    - credentials attempted but rejected or ineffective
+  - The current bug history already shows that capture and replay are not self-evident during use.
+- Why this matters:
+  - A silent credential system is hard for agents to use safely.
+  - If replay fails quietly, the agent cannot distinguish:
+    - no credentials exist
+    - credentials exist but auto-use is off
+    - credentials were used but were rejected
+    - credentials were never matched in the first place
+  - Production browser automation needs these states to be explicit.
+- Current assessment:
+  - This is a real observability and product-trust gap in the login assistance workflow.
 
 ### 8a. Saved credentials appear to have no automatic replay path in the runtime
 
