@@ -1819,6 +1819,76 @@ This document starts with verified issues from the Zapier workflow audit complet
 - Current assessment:
   - This is a meaningful product-maturity gap in the Aegis testing story.
 
+### 79. "Multi-context" currently means additional native runtimes, not a lightweight shared session architecture
+
+- Severity: `P1`
+- Surface: runtime architecture / parallelism model / product contract
+- Evidence from source:
+  - The docs say one `serve` process can own multiple isolated browser contexts at once.
+  - But `ManagerCommand::CreateContext` in [src/api/server.rs](/Users/deepsaint/Desktop/aegis/src/api/server.rs) calls `create_context_runtime(...)` for every new context.
+  - `create_context_runtime(...)` constructs a fresh `LoadedAegisClient::connect(...)`, which opens a new native host handle and bootstraps another runtime.
+  - Seeding from another context is done by `snapshot_session()` plus `inject_session(...)`, which copies session state into the new runtime rather than attaching both contexts to one shared live browser session.
+- Why this matters:
+  - That is a materially different architecture from "multiple logical sessions managed inside one shared browser substrate."
+  - It increases process count, memory usage, lifecycle complexity, and the probability that operators experience "Aegis opened more apps/runtimes again" instead of seamless parallel browsing.
+  - For a product that wants robust multi-agent browsing, cloning state into more runtimes is a much weaker foundation than explicit shared-session orchestration.
+- Current assessment:
+  - This is a real architectural gap between the current context model and the stronger production story implied by parallel browser-session positioning.
+
+### 80. The local product has no clear broker for discovering and reusing an already-running browser session across agents
+
+- Severity: `P1`
+- Surface: session ownership / multi-agent reuse / local control-plane UX
+- Evidence from source:
+  - The CLI assumes callers already know the right `--server-addr`, defaulting to `127.0.0.1:7878`.
+  - The docs describe targeting an already-running `aegis serve` process by explicit host:port, but current source inspection did not reveal a first-class runtime registry or attach workflow that lets another agent discover and adopt an existing live browser session automatically.
+  - Runtime instance directories exist under `~/.aegis/runtime/<scope>/instances`, but they are process markers, not an obvious supported attach/discovery API for agents.
+- Why this matters:
+  - On a machine running multiple agents, "share the same browsing session" should not depend on out-of-band knowledge of one port and one process.
+  - Without a broker/discovery layer, agents are incentivized to start another runtime instead of safely reusing the existing one.
+  - This directly works against the desired behavior where sessions are inspectable and cooperatively manageable as first-class local resources.
+- Current assessment:
+  - This is a real architecture and productization gap in the multi-agent story, not just a docs omission.
+
+### 81. The runtime exposes browser activation for already-attached browser ids, but not a full multi-browser ownership contract
+
+- Severity: `P2`
+- Surface: multi-window or multi-browser orchestration / API completeness
+- Evidence from source:
+  - `HostRuntimeState` exposes `attached_browser_ids` and there is an activation route for `/browsers/{browser_id}/activate`.
+  - The native host keeps a registry of attached browser ids and can switch the active browser among already-known entries.
+  - But current source inspection did not reveal a first-class product path for creating, naming, listing with richer ownership metadata, or coordinating multiple live browser windows/tabs as durable user-facing resources.
+  - The headful shell still ships a disabled new-tab affordance, and the broader docs continue to frame the system as one browser session per runtime.
+- Why this matters:
+  - Exposing activation alone is not enough for a production multi-browser story.
+  - Operators and agents need a clear contract for:
+    - when a second browser exists
+    - who created it
+    - how it is identified
+    - how it maps to a session, context, thread, or task
+    - whether another agent can safely inspect or take over that browser
+  - Without that, the surface feels halfway between single-session control and true multi-browser orchestration.
+- Current assessment:
+  - This is a real product-completeness gap in the architecture around multiple live browsing instances.
+
+### 82. `aegis open` launches the local app without any visible singleton-handoff or existing-session attach semantics
+
+- Severity: `P2`
+- Surface: desktop app lifecycle / user expectations / multi-instance control
+- Evidence from source:
+  - On macOS, [src/native.rs](/Users/deepsaint/Desktop/aegis/src/native.rs) implements `open_local_app(...)` by shelling out to `open <app_dir>`.
+  - Current source inspection did not reveal a first-class CLI handshake that asks an existing Aegis app/runtime to foreground itself, attach to an existing session, or reject duplicate launches with a clear explanation.
+  - Native runtime session markers are recorded per process under `~/.aegis/runtime/<scope>/instances/...`, which reinforces a process-centric model rather than a singleton app-or-session manager.
+- Why this matters:
+  - If the product experience is "sometimes another app/runtime appears," that is exactly the kind of behavior that makes the multi-session architecture feel unreliable.
+  - A serious local browser product should make the lifecycle intentional:
+    - foreground the current app
+    - attach to the current session
+    - or deliberately create a new isolated session with explicit identity
+  - The current launch path leaves too much of that behavior implicit.
+- Current assessment:
+  - This is a valid lifecycle and UX architecture gap even before proving every duplicate-launch symptom in a live repro.
+
 - Verify install and launcher behavior end to end, especially whether the bundled CLI becomes the obvious canonical entrypoint for users and agents.
 - Keep probing credential auto-store and auto-replay on more modern login flows, because the product direction depends heavily on that path feeling automatic and trustworthy.
 - Keep checking semantic/page-action stability on reactive apps, since the current research-layer races already proved the manifest is overstating reliability.
