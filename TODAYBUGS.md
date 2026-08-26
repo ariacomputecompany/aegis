@@ -1913,6 +1913,39 @@ This document starts with verified issues from the Zapier workflow audit complet
 - Current assessment:
   - This is a real architectural gap in the "multiple agents can access the same browsing session" story, even if basic shared access works incidentally today.
 
+### 84. Live context and runtime inventory is too thin to manage multiple browser sessions as first-class resources
+
+- Severity: `P2`
+- Surface: orchestration observability / session inspectability / multi-session operations
+- Evidence from source:
+  - `ContextSummary` in [src/api/server.rs](/Users/deepsaint/Desktop/aegis/src/api/server.rs) exposes only:
+    - `id`
+    - `default`
+    - `host_library`
+    - `browser`
+    - `profile`
+    - `runtime_state`
+    - `command_ready`
+  - `RuntimeInfo` and `HostRuntimeState` expose useful readiness and attached-browser state, but current source inspection did not reveal a first-class inventory surface that tells operators or agents things like:
+    - owning process id
+    - bound server address/port for that runtime
+    - creation time
+    - current controlling client or lease holder
+    - observer count
+    - explicit mapping from runtime instance markers under `~/.aegis/runtime/.../instances` back to API-visible sessions
+  - Runtime instance markers on disk record only minimal process-level information and are not surfaced as a supported management API.
+- Why this matters:
+  - Once multiple runtimes or contexts exist, production operators need more than "it exists and is command-ready."
+  - To manage live browser sessions safely, the platform should make it obvious:
+    - what sessions are alive
+    - where they are reachable
+    - who is using them
+    - which ones are stale
+    - how they correspond to desktop windows, contexts, and profiles
+  - Without that inventory layer, multi-session orchestration stays hard to reason about even if the lower-level runtime pieces work.
+- Current assessment:
+  - This is a real product-management gap in the live runtime/session control surface, distinct from the broader architecture and arbitration issues above.
+
 - Verify install and launcher behavior end to end, especially whether the bundled CLI becomes the obvious canonical entrypoint for users and agents.
 - Keep probing credential auto-store and auto-replay on more modern login flows, because the product direction depends heavily on that path feeling automatic and trustworthy.
 - Keep checking semantic/page-action stability on reactive apps, since the current research-layer races already proved the manifest is overstating reliability.
