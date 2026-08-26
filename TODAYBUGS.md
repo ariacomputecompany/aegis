@@ -1889,6 +1889,30 @@ This document starts with verified issues from the Zapier workflow audit complet
 - Current assessment:
   - This is a valid lifecycle and UX architecture gap even before proving every duplicate-launch symptom in a live repro.
 
+### 83. Multiple agents can target one live session, but there is no ownership or arbitration model for shared control
+
+- Severity: `P1`
+- Surface: multi-agent coordination / shared-session safety / control-plane architecture
+- Evidence from source:
+  - Each context exposes a single `mpsc::Sender<ApiCommand>` in [src/api/server.rs](/Users/deepsaint/Desktop/aegis/src/api/server.rs).
+  - Every route for that context enqueues work onto that same command channel and awaits a one-shot reply.
+  - Current source inspection did not reveal any first-class concept of:
+    - client identity
+    - session lease
+    - read-only observer vs controlling writer
+    - command preemption policy by caller
+    - scoped cancellation ownership
+  - Cancellation is context-wide: timeout and cancel paths call the runtime cancel handle for the context rather than a caller-scoped operation token.
+- Why this matters:
+  - Two agents on the same machine can technically hit the same session, but the contract is unsafe and underspecified.
+  - One agent can issue a long-running action while another agent:
+    - queues conflicting commands
+    - observes partially changed state
+    - or triggers cancellation that affects the other agent's operation
+  - A production shared-session model needs explicit coordination semantics, not just a shared queue.
+- Current assessment:
+  - This is a real architectural gap in the "multiple agents can access the same browsing session" story, even if basic shared access works incidentally today.
+
 - Verify install and launcher behavior end to end, especially whether the bundled CLI becomes the obvious canonical entrypoint for users and agents.
 - Keep probing credential auto-store and auto-replay on more modern login flows, because the product direction depends heavily on that path feeling automatic and trustworthy.
 - Keep checking semantic/page-action stability on reactive apps, since the current research-layer races already proved the manifest is overstating reliability.
