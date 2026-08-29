@@ -1,6 +1,6 @@
 # TODAYBUGS
 
-Date: August 26, 2026
+Date: August 29, 2026
 Repo: `/Users/deepsaint/Desktop/aegis`
 Scope: Bugs, DX gaps, productization risks, and usability failures identified during a real production-shaped Aegis session driving Zapier end to end.
 
@@ -1945,6 +1945,103 @@ This document starts with verified issues from the Zapier workflow audit complet
   - Without that inventory layer, multi-session orchestration stays hard to reason about even if the lower-level runtime pieces work.
 - Current assessment:
   - This is a real product-management gap in the live runtime/session control surface, distinct from the broader architecture and arbitration issues above.
+
+### 85. Aegis still lacks a first-class workflow recording and replay layer above traces
+
+- Severity: `P2`
+- Surface: productization / reusable automation workflows / CLI ergonomics
+- Evidence from source:
+  - Aegis already exposes lower-level building blocks for repeatability:
+    - command execution
+    - runtime events
+    - trace enablement
+    - session snapshot/load
+  - But current source and CLI inspection did not reveal a first-class workflow surface such as:
+    - `aegis record start <name>`
+    - `aegis record stop`
+    - `aegis workflow list`
+    - `aegis workflow inspect <name>`
+    - `aegis workflow run <name>`
+    - `aegis workflow replay <name>`
+  - The current replay story is trace-oriented, not workflow-oriented.
+- Why this matters:
+  - Aegis can already observe and log what an agent does, but it does not yet let operators promote a successful live run into a named reusable browser procedure cleanly.
+  - That forces users to bridge the gap manually between:
+    - one-off traced browser work
+    - reusable automation artifacts
+    - replayable browser workflows
+  - For the product direction here, that missing layer matters a lot because "teach by doing, then run it again" is one of the most natural things users will expect.
+- Better abstraction:
+  - `trace` should remain the forensic/debug artifact.
+  - `record` should capture a successful interactive run into a workflow artifact.
+  - `workflow` should manage and execute saved workflow artifacts.
+- Suggested CLI shape:
+  - `aegis record start <workflow-name>`
+  - `aegis record stop`
+  - `aegis workflow list`
+  - `aegis workflow inspect <workflow-name>`
+  - `aegis workflow run <workflow-name>`
+  - `aegis workflow replay <workflow-name>`
+- Current assessment:
+  - This is a real product-completeness gap. The existing trace/log/event substrate is strong enough that Aegis should probably expose workflow recording as a first-class layer instead of leaving users to assemble it from primitives.
+
+### 86. `aegis open` does not reliably promote an existing headless session into the same live headful session
+
+- Severity: `P1`
+- Surface: headless-to-headful transition / desktop attach semantics / session continuity
+- Evidence from source + product contract:
+  - The repo-level docs in [README.md](/Users/deepsaint/Desktop/aegis/README.md) and [docs/agent-control.md](/Users/deepsaint/Desktop/aegis/docs/agent-control.md) describe headless and headful as modes "against the same session."
+  - The CLI `open` path in [src/main.rs](/Users/deepsaint/Desktop/aegis/src/main.rs) routes directly into `native::open_local_app(...)`.
+  - On macOS, [src/native.rs](/Users/deepsaint/Desktop/aegis/src/native.rs) implements that by shelling out to `open <app_dir>`, which is an app-launch primitive rather than an explicit attach/promote-session handshake.
+  - Current source inspection still did not reveal a first-class flow that:
+    - locates the already-running headless runtime for the active session
+    - binds the app window to that exact live runtime
+    - confirms the same session was foregrounded rather than a separate launch path being triggered
+  - User report from current product usage is that trying to open the same session in headful mode from a headless session freezes rather than cleanly surfacing the live browser.
+- Why this matters:
+  - This is stronger than the already documented "open lacks singleton handoff" UX issue in item `82`.
+  - The advertised session model implies operators should be able to move from unattended control to visible debugging without losing the exact live browser state.
+  - If that transition freezes or silently fails, one of the most important production workflows becomes unsafe:
+    - inspect what the headless agent is doing
+    - recover an in-flight task visually
+    - take over the exact same authenticated/browser state
+- Relationship to existing entries:
+  - Item `82` covers the generic app-launch lifecycle gap.
+  - This item is the more concrete product bug that the promised same-session headless-to-headful promotion path is not dependable in practice.
+- Current assessment:
+  - This should be treated as a distinct P1 session-continuity bug, not just a launch UX papercut.
+
+### 87. Long-lived Aegis sessions can decay into stale or nonfunctional runtimes over time without a clear recovery contract
+
+- Severity: `P1`
+- Surface: session longevity / runtime health / background reliability
+- Evidence from source + prior findings:
+  - The main-thread runtime loop in [src/api/server.rs](/Users/deepsaint/Desktop/aegis/src/api/server.rs) depends on periodic idle `pump()` calls to keep the browser event loop healthy.
+  - When `pump()` fails, telemetry records `runtime_pump_failure`, but current source inspection did not reveal a stronger self-healing path that refreshes, restarts, or quarantines that runtime automatically.
+  - Startup session restoration is a one-time inject path, and best-effort persistence snapshots state opportunistically, but that is not the same as an explicit long-lived session health-management contract.
+  - Existing verified issues already show adjacent symptoms:
+    - item `45`: orphaned helper processes and stale runtime buildup
+    - item `48`: real crash reports in session/cookie snapshot paths
+    - item `84`: inventory is too thin to identify stale sessions cleanly
+  - User report from current product usage is that sessions become stale after a while and effectively stop working.
+- Why this matters:
+  - A browser runtime intended for agent reuse cannot treat "works for a while, then goes stale" as an acceptable edge case.
+  - For real operators, this presents as:
+    - hidden state drift
+    - frozen or ignored commands
+    - uncertain recovery steps
+    - loss of trust in whether a session is still safe to reuse
+  - The risk is amplified because stale sessions can look superficially alive until a critical action is attempted.
+- Relationship to existing entries:
+  - This is not a duplicate of item `45`, which is mainly about leaked helper processes.
+  - It is not a duplicate of item `48`, which is mainly about explicit crash evidence in snapshot logic.
+  - It is the higher-level product bug that the long-lived session lifecycle itself does not remain healthy and recoverable enough for production use.
+- Current assessment:
+  - This should stay in the bugs document as a distinct P1 reliability issue until Aegis has:
+    - explicit stale-session detection
+    - clear degradation signals
+    - supported session refresh/reconnect behavior
+    - and evidence that long-lived sessions remain commandable over time
 
 - Verify install and launcher behavior end to end, especially whether the bundled CLI becomes the obvious canonical entrypoint for users and agents.
 - Keep probing credential auto-store and auto-replay on more modern login flows, because the product direction depends heavily on that path feeling automatic and trustworthy.
