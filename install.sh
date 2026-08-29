@@ -264,7 +264,6 @@ require_command cmake
 require_command python3
 
 if [[ "$PLATFORM" == "Darwin" ]]; then
-  require_command xcodebuild
   require_command codesign
 fi
 

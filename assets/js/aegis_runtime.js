@@ -1528,23 +1528,56 @@
     const overlayText = normalizeText(overlays.map((overlay) => overlay.text).join("\n"));
 
     const combinedText = normalizeText(`${title || ""} ${visibleText}`);
+    const currentUrlWithoutHash = (() => {
+      if (!url) {
+        return null;
+      }
+      try {
+        const parsed = new URL(url);
+        parsed.hash = "";
+        return parsed.href;
+      } catch (_error) {
+        return null;
+      }
+    })();
+    const samePageAnchorLinkCount = currentUrlWithoutHash
+      ? links.filter((link) => link.href && link.href.startsWith(`${currentUrlWithoutHash}#`)).length
+      : 0;
+    const codeBlockCount = document.querySelectorAll("pre, code").length;
+    const tableCount = document.querySelectorAll("table").length;
+    const documentationLikely = articleText.length >= 300
+      || mainText.length >= 300
+      || (
+        visibleText.length >= 1000
+        && headings.length >= 3
+        && (samePageAnchorLinkCount >= 3 || codeBlockCount > 0 || tableCount > 0)
+      );
+    const headingText = normalizeText(headings.slice(0, 3).map((heading) => heading.text).join(" "));
+    const shortVisibleText = visibleText.length <= 600 ? visibleText : "";
+    const errorSurfaceText = normalizeText(
+      Array.from(document.querySelectorAll("[role='alert'], [role='status'], .error, .not-found, #error, #not-found"))
+        .filter((node) => isElementVisible(node))
+        .map((node) => node.innerText || node.textContent || "")
+        .join(" ")
+    );
+    const notFoundSurfaceText = normalizeText(`${title || ""} ${headingText} ${shortVisibleText} ${errorSurfaceText}`);
     const notFoundSignals = [];
     const pushSignal = (signal) => {
       if (!notFoundSignals.includes(signal)) {
         notFoundSignals.push(signal);
       }
     };
-    if (combinedText.includes("404")) {
-      pushSignal("title_or_body_mentions_404");
+    if (/\b(?:404|410)\b/i.test(notFoundSurfaceText)) {
+      pushSignal("status_surface_mentions_404_or_410");
     }
-    if (combinedText.includes("page not found")) {
-      pushSignal("page_not_found_text");
+    if (/\bpage not found\b/i.test(notFoundSurfaceText)) {
+      pushSignal("page_not_found_surface_text");
     }
-    if (combinedText.includes("not found")) {
-      pushSignal("not_found_text");
+    if (/\bnot found\b/i.test(notFoundSurfaceText)) {
+      pushSignal("not_found_surface_text");
     }
-    if (combinedText.includes("doesn't exist") || combinedText.includes("does not exist")) {
-      pushSignal("missing_page_text");
+    if (/\bdoesn't exist\b/i.test(notFoundSurfaceText) || /\bdoes not exist\b/i.test(notFoundSurfaceText)) {
+      pushSignal("missing_page_surface_text");
     }
     const blockerSignals = [];
     const pushBlocker = (signal) => {
@@ -1574,7 +1607,7 @@
         ? "auth"
         : /search results|results for/i.test(combinedText)
           ? "search_results"
-          : articleText.length >= 300 || mainText.length >= 300
+          : documentationLikely
             ? "documentation"
             : forms.length > 0 && controls.some((control) => control.control_type === "password")
               ? "login_form"
@@ -1637,8 +1670,8 @@
         overlay_count: overlays.length,
         dialog_count: overlays.filter((overlay) => overlay.kind === "dialog" || overlay.kind === "alertdialog").length,
         alert_count: overlays.filter((overlay) => overlay.kind === "alert").length,
-        code_block_count: document.querySelectorAll("pre, code").length,
-        table_count: document.querySelectorAll("table").length
+        code_block_count: codeBlockCount,
+        table_count: tableCount
       },
       page_type: pageType,
       useful_text_available: usefulTextAvailable,

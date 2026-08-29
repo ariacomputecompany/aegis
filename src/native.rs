@@ -439,9 +439,37 @@ impl NativePlatform {
 
 fn configure_generator(platform: NativePlatform) -> Option<&'static str> {
     match platform {
-        NativePlatform::Macos => Some("Xcode"),
+        NativePlatform::Macos => macos_configure_generator(),
         NativePlatform::Linux => None,
     }
+}
+
+fn macos_configure_generator() -> Option<&'static str> {
+    macos_configure_generator_for(macos_full_xcode_available(), command_exists("ninja"))
+}
+
+fn macos_configure_generator_for(
+    full_xcode_available: bool,
+    ninja_available: bool,
+) -> Option<&'static str> {
+    if full_xcode_available {
+        Some("Xcode")
+    } else if ninja_available {
+        Some("Ninja")
+    } else {
+        None
+    }
+}
+
+fn macos_full_xcode_available() -> bool {
+    let Ok(output) = Command::new("xcodebuild").arg("-version").output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().any(|line| line.starts_with("Xcode "))
 }
 
 fn configure_args(
@@ -462,13 +490,15 @@ fn configure_args(
             path_str(&root.join(cef_sdk_dir(platform)))?
         ),
     ];
-    if let Some(generator) = configure_generator(platform) {
+    let generator = configure_generator(platform);
+    if let Some(generator) = generator {
         args.push("-G".to_string());
         args.push(generator.to_string());
     }
     if platform == NativePlatform::Macos {
         args.push(format!("-DPROJECT_ARCH={}", apple_arch()));
-    } else {
+    }
+    if platform != NativePlatform::Macos || generator != Some("Xcode") {
         args.push(format!("-DCMAKE_BUILD_TYPE={}", configuration.as_str()));
     }
     Ok(args)
@@ -479,11 +509,11 @@ fn native_build_tree_healthy(
     configure_artifact: &Path,
     platform: NativePlatform,
 ) -> bool {
-    if configure_artifact.exists() {
+    let cache_path = build_dir.join("CMakeCache.txt");
+    if configure_artifact.exists() && configure_artifact != cache_path {
         return true;
     }
 
-    let cache_path = build_dir.join("CMakeCache.txt");
     if !cache_path.exists() {
         return false;
     }
@@ -492,7 +522,10 @@ fn native_build_tree_healthy(
         return false;
     };
     match platform {
-        NativePlatform::Macos => cache.contains("CMAKE_GENERATOR:INTERNAL=Xcode"),
+        NativePlatform::Macos => {
+            cache.contains("CMAKE_GENERATOR:INTERNAL=Ninja")
+                || cache.contains("CMAKE_GENERATOR:INTERNAL=Unix Makefiles")
+        }
         NativePlatform::Linux => cache.contains("CMAKE_GENERATOR:INTERNAL=Unix Makefiles"),
     }
 }
@@ -530,7 +563,10 @@ fn build_dir(root: &Path, platform: NativePlatform) -> PathBuf {
 fn configure_artifact(root: &Path, platform: NativePlatform) -> PathBuf {
     let build_dir = build_dir(root, platform);
     match platform {
-        NativePlatform::Macos => build_dir.join("aegis_native.xcodeproj"),
+        NativePlatform::Macos if configure_generator(platform) == Some("Xcode") => {
+            build_dir.join("aegis_native.xcodeproj")
+        }
+        NativePlatform::Macos => build_dir.join("CMakeCache.txt"),
         NativePlatform::Linux => build_dir.join("CMakeCache.txt"),
     }
 }
@@ -974,7 +1010,7 @@ fn command_exists(name: &str) -> bool {
 
 fn required_command_names(platform: NativePlatform) -> Vec<&'static str> {
     match platform {
-        NativePlatform::Macos => vec!["cargo", "cmake", "python3", "xcodebuild", "codesign"],
+        NativePlatform::Macos => vec!["cargo", "cmake", "python3", "codesign"],
         NativePlatform::Linux => vec!["cargo", "cmake", "python3"],
     }
 }
@@ -1088,6 +1124,34 @@ mod tests {
         unsafe {
             std::env::remove_var("HOME");
         }
+    }
+
+    #[test]
+    fn macos_generator_uses_xcode_then_ninja_then_makefiles() {
+        assert_eq!(macos_configure_generator_for(true, true), Some("Xcode"));
+        assert_eq!(macos_configure_generator_for(false, true), Some("Ninja"));
+        assert_eq!(macos_configure_generator_for(false, false), None);
+    }
+
+    #[test]
+    fn macos_build_tree_rejects_stale_xcode_cache_for_single_config_builds() {
+        let temp = tempfile::tempdir().expect("temporary dir should be created");
+        let build_dir = temp.path();
+        let cache = build_dir.join("CMakeCache.txt");
+
+        fs::write(&cache, "CMAKE_GENERATOR:INTERNAL=Xcode\n").expect("cache should be written");
+        assert!(!native_build_tree_healthy(
+            build_dir,
+            &cache,
+            NativePlatform::Macos
+        ));
+
+        fs::write(&cache, "CMAKE_GENERATOR:INTERNAL=Ninja\n").expect("cache should be written");
+        assert!(native_build_tree_healthy(
+            build_dir,
+            &cache,
+            NativePlatform::Macos
+        ));
     }
 
     #[cfg(target_os = "macos")]
