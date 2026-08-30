@@ -1,6 +1,6 @@
 # TODAYBUGS
 
-Date: August 29, 2026
+Date: August 30, 2026
 Repo: `/Users/deepsaint/Desktop/aegis`
 Scope: Bugs, DX gaps, productization risks, and usability failures identified during a real production-shaped Aegis session driving Zapier end to end.
 
@@ -2042,6 +2042,142 @@ This document starts with verified issues from the Zapier workflow audit complet
     - clear degradation signals
     - supported session refresh/reconnect behavior
     - and evidence that long-lived sessions remain commandable over time
+
+### 88. Modern ARIA-driven controls were not consistently surfaced as clickable actions by the runtime heuristics
+
+- Severity: `P1`
+- Surface: actionability inference / modern React app support / semantic control discovery
+- Evidence from source + local patch:
+  - The Meta Ads report identified a concrete blocker where Aegis could see custom controls but did not offer `click` for many non-native interactive elements.
+  - A local production fix is currently sitting in [assets/js/aegis_runtime.js](/Users/deepsaint/Desktop/aegis/assets/js/aegis_runtime.js), adding a `clickableRoles` allowlist for:
+    - `button`
+    - `combobox`
+    - `menuitem`
+    - `option`
+    - `tab`
+  - Before that change, the actionability heuristic primarily favored native tags and missed a large class of real modern dashboard controls.
+- Why this matters:
+  - This is not a niche accessibility edge case.
+  - Large SaaS apps routinely implement primary controls with ARIA roles on non-button elements.
+  - If those controls are visible but not exposed as clickable, Aegis fails at exactly the kind of production UIs it most needs to support.
+- Relationship to existing entries:
+  - This is distinct from item `67`, which is about `page actions` omitting the relevant controls from the primary list.
+  - This is the lower-level runtime bug that some controls were not even classified as clickable in the first place.
+- Current assessment:
+  - A local fix exists and should be pushed, but the issue still belongs in the bugs log because it needs regression coverage and likely broader role/actionability handling beyond this initial allowlist.
+
+### 89. Clicks can be reported as interaction success even when the target app does not actually advance
+
+- Severity: `P1`
+- Surface: click reliability / event synthesis / modern React control activation
+- Evidence from field report + source shape:
+  - In the Meta Ads run, some click attempts only registered as `interaction_only` even though the app did not actually move forward.
+  - Current source already contains the `interaction_only` result path in [src/runtime/executor.rs](/Users/deepsaint/Desktop/aegis/src/runtime/executor.rs), which matches the observed failure mode.
+  - The reported workaround was to fall back to direct browser-side `element.click()` and manual event dispatch.
+- Why this matters:
+  - This is worse than a clean "not clickable" failure because it creates a false sense of success.
+  - In production automation, a click primitive should not stop at "some interaction happened"; it should be much better at reaching the real actionable control and detecting whether anything meaningful changed.
+- Desired fix direction:
+  - resolve the nearest actionable ancestor more aggressively
+  - fire a stronger pointer/mouse sequence where needed
+  - verify post-click state change such as URL, focused element, DOM mutation, or relevant control-state change
+- Relationship to existing entries:
+  - Item `4` covers opaque "node not targetable" failures.
+  - Item `5` covers weak confidence that clicks changed app state.
+  - This item is the more concrete false-positive click-success path in the runtime result model itself.
+- Current assessment:
+  - This is a distinct P1 correctness issue in the click primitive, especially for React-heavy enterprise UIs.
+
+### 90. Large `/execute` and eval payloads are not reliable enough for automation-heavy workflows
+
+- Severity: `P1`
+- Surface: request transport / browser-side automation payloads / upload-adjacent workflows
+- Evidence from field report:
+  - Large browser execution payloads, especially ones involving base64 image data, returned empty or null results, silently did nothing, or failed awkwardly through downstream tooling.
+  - The practical workaround was to split work into smaller one-request-at-a-time executions with local helper scripts.
+- Why this matters:
+  - This is distinct from existing payload-shape validation issues and primitive return-value bugs.
+  - Real automation workflows often need to move structured data, generated content, or upload-adjacent metadata through the execution channel.
+  - If larger payloads fail unclearly, users are pushed into bespoke chunking logic outside the product.
+- Relationship to existing entries:
+  - Item `15` is about `/execute` being easy to misuse.
+  - Items `38` and `75` are about return-value fidelity.
+  - This item is specifically about payload-size and payload-volume reliability under real automation load.
+- Current assessment:
+  - Aegis needs explicit request-size guarantees, clearer failure modes, and probably a first-class large-payload or file-backed handoff path.
+
+### 91. `/readyz` does not cleanly distinguish "runtime is busy" from "runtime is unavailable" during long operations
+
+- Severity: `P2`
+- Surface: readiness semantics / long-running operations / script resilience
+- Evidence from field report + existing patterns:
+  - During the Meta Ads run, `/readyz` sometimes failed transiently even though the session was still alive and eventually useful.
+  - Existing entries already prove startup-time readiness can mislead, but this report adds a different failure mode: readiness flakiness during an ongoing live session rather than only at bootstrap.
+- Why this matters:
+  - Operators need to know whether they should:
+    - retry because the browser is still working on something
+    - wait for a current operation to settle
+    - or declare the runtime unavailable and recover
+  - A binary ready/not-ready surface is too lossy for long-running automation.
+- Relationship to existing entries:
+  - Item `34` is about detached startup returning before the runtime is actually ready.
+  - This item is about live-session readiness semantics degrading during long operations.
+- Current assessment:
+  - The control plane should report richer health states than a plain readiness failure and preserve last-known browser/session status while work is in flight.
+
+### 92. Page-context localhost restrictions leave Aegis without a first-class browser-independent file or network bridge
+
+- Severity: `P2`
+- Surface: local asset handoff / automation ergonomics / page-context limitations
+- Evidence from field report:
+  - In the Meta Ads flow, `fetch("http://127.0.0.1:...")` from inside the page context failed.
+  - That may be due to CSP, private-network restrictions, or browser policy rather than an Aegis bug by itself.
+  - But the practical result was that the operator could not rely on the page context to pull local helper data when needed.
+- Why this matters:
+  - Aegis should not require browser-page fetches to localhost as the de facto escape hatch for richer automation.
+  - When the page blocks that pattern, the product needs its own supported bridge for:
+    - file-backed data injection
+    - local artifact handoff
+    - or page-independent network mediation
+- Current assessment:
+  - This belongs in the bug log as a productization gap even if the immediate root cause is standard browser security behavior rather than an Aegis regression.
+
+### 93. The CLI still misses obvious aliases and shorthands for common wait and scroll actions
+
+- Severity: `P3`
+- Surface: CLI ergonomics / live automation pacing / command discoverability
+- Evidence from field report + current command surface:
+  - The natural operator guess was `wait`, but the actual command surface uses `wait_for`.
+  - Simple scroll operations still require explicit coordinates instead of more natural affordances such as:
+    - `scroll --down`
+    - `scroll --up`
+    - `scroll --to <text>`
+  - Current source surfaces `wait_for` and coordinate-based `scroll`, but not the more forgiving shorthand operators that live users reasonably expect.
+- Why this matters:
+  - These are small issues individually, but they add friction exactly when users are trying to keep momentum during live debugging or automation.
+  - The product becomes easier to use when common intentions map cleanly to the first command someone would try.
+- Current assessment:
+  - This is not a production blocker, but it is a real DX gap worth cleaning up.
+
+### 94. Aegis lacks a first-class job model for long-running browser operations
+
+- Severity: `P2`
+- Surface: operation lifecycle / polling ergonomics / long-running workflow support
+- Evidence from field report:
+  - The Meta Ads flow needed repeated hand-rolled retries, readiness checks, and event scraping for operations that were longer-lived than a simple request/response action.
+  - The natural operator need was a model like:
+    - start work
+    - poll status
+    - collect result
+    - continue from a known terminal state
+- Why this matters:
+  - Without a job model, long-running browser tasks blur together with transport retries and health probing.
+  - That makes automation code noisier and pushes workflow logic out of Aegis and into per-user scripts.
+- Relationship to existing entries:
+  - Item `85` is about recording and replaying workflows.
+  - This item is narrower and more operational: a first-class lifecycle for one long-running browser action.
+- Current assessment:
+  - Aegis would benefit from a job-style abstraction for long browser actions instead of forcing every caller to build custom polling semantics around raw commands.
 
 - Verify install and launcher behavior end to end, especially whether the bundled CLI becomes the obvious canonical entrypoint for users and agents.
 - Keep probing credential auto-store and auto-replay on more modern login flows, because the product direction depends heavily on that path feeling automatic and trustworthy.

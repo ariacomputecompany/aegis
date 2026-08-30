@@ -804,7 +804,8 @@
     if (tag === "a" && attrs.href) {
       actions.push("click", "open", "hover", "press_key");
     }
-    if (tag === "button" || (tag === "input" && ["button", "submit", "reset", "checkbox", "radio", "image"].includes(type)) || tag === "summary") {
+    const clickableRoles = new Set(["button", "combobox", "menuitem", "option", "tab"]);
+    if (tag === "button" || clickableRoles.has(attrs.role) || (tag === "input" && ["button", "submit", "reset", "checkbox", "radio", "image"].includes(type)) || tag === "summary") {
       actions.push("click", "hover", "press_key");
     }
     if (tag === "input" && [ "submit", "image" ].includes(type)) {
