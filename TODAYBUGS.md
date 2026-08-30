@@ -2179,6 +2179,26 @@ This document starts with verified issues from the Zapier workflow audit complet
 - Current assessment:
   - Aegis would benefit from a job-style abstraction for long browser actions instead of forcing every caller to build custom polling semantics around raw commands.
 
+### 95. Title-based return-channel workarounds are unsafe when more than one browser-side script can run in parallel
+
+- Severity: `P1`
+- Surface: eval-result workarounds / parallel script safety / multi-action correctness
+- Evidence from existing behavior + workflow pattern:
+  - Item `38` already documents that primitive `eval` return values are unreliable enough that users may resort to side-channel workarounds.
+  - One real workaround used in practice was to encode status into `document.title` and read the title back afterward.
+  - That pattern is fundamentally unsafe once two browser-side scripts or agent actions can overlap against the same live page/session, because `document.title` is one shared mutable global for the whole page.
+  - If two flows use the title as a return channel at the same time, they can overwrite each other, misattribute results, or observe stale status from a different action.
+- Why this matters:
+  - This turns an already awkward workaround into a correctness hazard under exactly the parallel-agent and multi-action conditions Aegis wants to support.
+  - A return-channel collision can make one action appear successful or failed based on another action's title write, which is worse than a clean missing-result error.
+  - The bug is especially important because title-based status hacks are the kind of workaround capable users naturally reach for when the official eval contract is weak.
+- Relationship to existing entries:
+  - Item `38` is about primitive eval results being dropped.
+  - Item `83` is about missing ownership/arbitration for multiple agents on one live session.
+  - This item is the concrete concurrency bug created when the current eval weakness pushes users toward a shared global return channel.
+- Current assessment:
+  - Aegis needs a real per-request structured return path for browser-side execution so users do not have to tunnel results through page-global mutable state like `document.title`.
+
 - Verify install and launcher behavior end to end, especially whether the bundled CLI becomes the obvious canonical entrypoint for users and agents.
 - Keep probing credential auto-store and auto-replay on more modern login flows, because the product direction depends heavily on that path feeling automatic and trustworthy.
 - Keep checking semantic/page-action stability on reactive apps, since the current research-layer races already proved the manifest is overstating reliability.
