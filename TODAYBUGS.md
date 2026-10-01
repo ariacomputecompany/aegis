@@ -2199,6 +2199,50 @@ This document starts with verified issues from the Zapier workflow audit complet
 - Current assessment:
   - Aegis needs a real per-request structured return path for browser-side execution so users do not have to tunnel results through page-global mutable state like `document.title`.
 
+### 96. Aegis cannot yet act as a first-class controller for supported external browser engines or their existing opt-in sessions (proposed: `aegis puppet`)
+
+- Severity: `P1`
+- Surface: browser-engine interoperability / existing-session adoption / headful and headless lifecycle / multi-browser orchestration
+- Requested product capability:
+  - Add an `aegis puppet` CLI surface that lets Aegis control an explicitly supported external browser engine on the same machine, rather than only the Aegis-owned bundled CEF runtime.
+  - Supported engines should be named and versioned deliberately, beginning with Chromium-family targets such as Chrome and Brave, with explicit support status rather than an implied promise that every installed browser works.
+  - Each supported engine should be usable in both modes where that engine supports them:
+    - launch a new headful target
+    - launch a new headless target
+    - discover and attach to an already-running, user-authorized browser instance
+    - select and control an existing browser context/window/tab without losing its live cookies, authenticated state, page history, or active UI state
+- Evidence from current source and CLI architecture:
+  - The current CLI has one browser-mode switch, `--mode headless|headful`, and its `open` command opens the canonical Aegis app; it does not expose an engine selector, a supported-browser registry, target discovery, or an external-browser attach command.
+  - The native host creates its own CEF request context and browser through `CefRequestContext::CreateContext(...)` and `CefBrowserHost::CreateBrowserSync(...)` in [native/src/aegis_cef_host.cpp](/Users/deepsaint/Desktop/aegis/native/src/aegis_cef_host.cpp). That is an Aegis-owned browser lifecycle, not a connector to a Chrome or Brave process that was already running.
+  - The existing `attached_browser_ids` and activation route only address browser objects already registered inside the Aegis native host. They do not provide a path to enumerate an external browser's profiles, windows, tabs, contexts, debugging endpoints, or consent state.
+  - Current source inspection did not reveal a product-level Chrome DevTools Protocol connector, remote-debugging discovery flow, external-engine adapter boundary, or CLI contract for attaching to a pre-existing browser process.
+- Why this matters:
+  - The strongest computer-use workflow is often not "start a fresh synthetic browser"; it is "continue the work already open on this computer." Users may already be authenticated in Chrome or Brave, have a partially completed form, active SaaS state, downloads, extensions, or a page whose exact state must be preserved.
+  - A separate Aegis runtime forces agents to recreate context and login state, which is slower and less dependable than safely adopting an authorized live target.
+  - Engine choice also matters operationally. Teams need to choose a production browser version, an extension-bearing browser profile, or a lightweight headless target without giving up the Aegis command, trace, workflow, and policy layers.
+  - The lack of this capability compounds existing issues around session reuse, headless-to-headful continuity, runtime inventory, and multi-agent coordination.
+- Required product contract:
+  - `aegis puppet engines` lists supported engines, discovered installations, supported modes, adapter versions, and availability diagnostics.
+  - `aegis puppet launch --engine chrome|brave --mode headful|headless [--profile <name>]` creates an Aegis-managed target and returns a stable Aegis target id.
+  - `aegis puppet discover --engine chrome|brave` lists only attachable, user-authorized instances and their windows/tabs/contexts with stable target identity, URL/title, profile identity, mode, and ownership state.
+  - `aegis puppet attach <target-id>` adopts one discovered target into Aegis without silently closing, replacing, or resetting it; an explicit `--take-control` or equivalent consent path should be required where attachment changes the browser's launch/debug settings.
+  - Existing Aegis page, action, trace, credential, workflow, screenshot, and event commands should operate against the selected puppet target through one normalized target abstraction, while preserving engine-specific capability reporting rather than pretending every engine supports every primitive.
+  - `aegis puppet detach <target-id>` releases Aegis control without closing a user-owned browser; `close` must be a distinct, explicit lifecycle action and only be allowed for Aegis-managed targets unless the user opts in.
+  - Each target must expose its engine, process/profile identity, context/window/tab identity, connection endpoint, headful/headless state, owner/lease state, and whether Aegis launched or merely attached to it.
+- Safety and reliability requirements:
+  - Do not attach to arbitrary local browser processes by default. Existing-browser control must use an explicit user-authorized discovery/attach mechanism and make the permission/remote-debugging boundary visible.
+  - Treat profile, target, and connection identity as separate concepts. A target reconnect must not accidentally jump from one user profile or tab to another merely because titles or URLs match.
+  - External connection loss must produce a clear detached/stale state with reconnect behavior; it must not look like a successful but frozen Aegis session.
+  - Integrate per-target leases and conflict diagnostics before advertising parallel agents or batch actions against the same live external tab. This is especially important given items `83` and `95`.
+  - Normalize behavior conservatively across engines: report unsupported capabilities as structured errors, preserve user-owned browser state, and never fake headful/headless equivalence where the target browser cannot provide it.
+- Relationship to existing entries:
+  - Item `79` is about Aegis internally creating additional native runtimes for multi-context work. This item is about adapters for external browser engines and already-running browser processes.
+  - Items `80` through `84` cover discovery, ownership, and inventory of Aegis-managed sessions. This item expands that missing management model to external browser targets and makes it a product-level CLI feature.
+  - Item `86` covers the broken Aegis-owned headless-to-headful promotion path. `aegis puppet` must support headful and headless targets cleanly, but it is not a substitute for fixing that existing same-session bug.
+  - Item `81` covers activating Aegis-attached browser ids. It is not a duplicate: an external browser process, its profile, and its existing tabs are outside that current registry.
+- Current assessment:
+  - This is a major missing platform feature, not a small launcher enhancement. The correct implementation is an explicit adapter and target-broker layer with a normalized lifecycle contract, not a collection of browser-specific shell commands or fragile window-title heuristics.
+
 - Verify install and launcher behavior end to end, especially whether the bundled CLI becomes the obvious canonical entrypoint for users and agents.
 - Keep probing credential auto-store and auto-replay on more modern login flows, because the product direction depends heavily on that path feeling automatic and trustworthy.
 - Keep checking semantic/page-action stability on reactive apps, since the current research-layer races already proved the manifest is overstating reliability.

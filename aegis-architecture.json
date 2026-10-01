@@ -1,0 +1,1473 @@
+{
+  "schema": {
+    "name": "aegis-architecture",
+    "version": 1,
+    "intended_use": [
+      "engineering visuals",
+      "architecture diagrams",
+      "runtime flow graphics",
+      "control-plane documentation",
+      "future engineering planning"
+    ],
+    "generated_from": {
+      "repository_root": "/Users/deepsaint/Desktop/aegis",
+      "date": "2026-10-01",
+      "method": "direct source audit",
+      "skill_used": "first-principles-thinking",
+      "accuracy_policy": "Claims are grounded in repository files and code paths. Speculative interpretation is separated from observed implementation."
+    }
+  },
+  "first_principles_frame": {
+    "reality": [
+      "Aegis is implemented as a Rust crate and CLI, a native CEF runtime, and an injected browser-page JavaScript runtime.",
+      "The browser is controlled through a persistent local HTTP API served by Rust.",
+      "Real browser behavior is executed by CEF in native code, not by a fake DOM or simulated browser model.",
+      "Rust communicates with the native host through a dynamically loaded C ABI and a framed protocol with magic AEGS and protocol version 1.",
+      "The page runtime turns browser DOM, page state, media state, and interactions into JSON data consumed by Rust."
+    ],
+    "interpretation": [
+      "The central architecture is a real-browser control plane, not a browser automation library embedded in a test harness.",
+      "The core product boundary is one persistent browser session behind one local control API.",
+      "The durable product state is Aegis-owned JSON under ~/.aegis, while Chromium profile behavior is runtime substrate rather than the canonical persistence API.",
+      "The injected JS runtime is the semantic lens that makes arbitrary web pages agent-addressable."
+    ],
+    "contradictions": [
+      {
+        "expectation": "A browser automation tool might relaunch a browser per command.",
+        "evidence": "README states one persistent serve process and no production per-command relaunch path; src/main.rs resolves serve as the default non-shortcut command; src/api/server.rs serializes operations through runtime contexts."
+      },
+      {
+        "expectation": "DOM ids could be sufficient for automation.",
+        "evidence": "README says semantic match targeting is canonical; src/commands/matcher.rs and assets/js/aegis_runtime.js both implement matcher scoring across role, name, label, text, placeholder, test id, href, control type, tag, actionability, and visibility."
+      },
+      {
+        "expectation": "Session persistence could use browser profile directories.",
+        "evidence": "README and docs/agent-control.md state Chromium profiles are not the persistence API; src/state.rs, src/session/profile.rs, and src/config_store.rs implement Aegis-owned JSON state, secrets, and credentials."
+      },
+      {
+        "expectation": "The Rust side alone owns the browser model.",
+        "evidence": "src/runtime/executor.rs delegates page execution, snapshots, storage, and live state to CefBridge; native/src/aegis_cef_host.cpp delegates DOM operations to renderer IPC; assets/js/aegis_runtime.js performs semantic page inspection and action execution."
+      }
+    ],
+    "what_the_lamp_reveals": [
+      "Aegis is best understood as a three-layer browser intelligence stack: Rust control plane, native CEF host, and injected semantic page runtime.",
+      "The protocol boundary is intentionally thin and stable: Rust sends typed envelopes; native owns browser lifecycle; JS owns page semantics.",
+      "Determinism is pursued above a nondeterministic browser by sequencing events, recording traces, normalizing state, and validating behavior with Fozzy scenarios."
+    ],
+    "better_abstraction": "Aegis is a persistent real-browser operating surface for agents. It converts real CEF browser state into a typed, traceable, semantic control API.",
+    "what_is_proven": [
+      "The repository exposes a Rust lib and bin named aegis.",
+      "The CLI includes open, version, serve, usage, examples, navigate, search, page, trace, config, and native subcommands.",
+      "The HTTP API exposes default-context routes and /contexts/{context_id} scoped equivalents.",
+      "The native host exports aegis_create_host, aegis_destroy_host, aegis_last_error_message, and aegis_get_function_table.",
+      "The host ABI function table includes ensure_runtime, eval_js, send_batch, snapshot_dom, inject_session, snapshot_session, drain_events, navigate, snapshot_host_state, activate_browser, pump, request_cancel, and free_buffer.",
+      "The injected JS runtime installs window.__aegis with snapshot, exec, click, hover, pressKey, setValue, setFiles, scrollToPosition, drag, geometry, drainEvents, currentPageState, resolveTargetInfo, waitState, and pageResearchData."
+    ],
+    "what_is_still_unknown": [
+      "Runtime behavior against arbitrary third-party websites can only be fully validated with live host-backed browser runs.",
+      "Some CEF and platform behavior depends on the local CEF SDK, OS, signing state, and installed native artifacts.",
+      "The architecture file describes source structure and intended behavior, not a guarantee that every route is currently bug-free under all live sites."
+    ],
+    "next_experiments": [
+      "Run host-backed Fozzy trace verification after architecture-affecting code changes.",
+      "Generate architecture diagrams from the graph_model section and compare against code owner review.",
+      "Record a host-backed trace for representative login, download, upload, media, and multi-context workflows.",
+      "Add automated schema validation for this architecture file if it becomes a long-lived visualization input."
+    ],
+    "honest_thesis": "Aegis is architected as a persistent CEF-backed browser runtime with a Rust API/CLI/control plane and a JS semantic automation runtime injected into every page. Its durable value is the conversion of real browser state into structured, replayable, agent-friendly operations."
+  },
+  "repository": {
+    "name": "aegis",
+    "root": "/Users/deepsaint/Desktop/aegis",
+    "language_stack": [
+      "Rust 2024",
+      "C++20",
+      "Objective-C++ on macOS",
+      "JavaScript injected into pages",
+      "Bash and Python support scripts",
+      "Fozzy scenario JSON"
+    ],
+    "top_level_files": {
+      "Cargo.toml": "Rust package manifest for crate and binary aegis.",
+      "Cargo.lock": "Pinned Rust dependency resolution.",
+      "README.md": "Product model, CLI, API, install, state, and usage documentation.",
+      "docs/agent-control.md": "Agent-facing control guide and production runtime guidance.",
+      "fozzy.toml": "Fozzy artifact root configuration.",
+      "install.sh": "Canonical local install path.",
+      "aegis-architecture.json": "This architecture artifact."
+    },
+    "source_layout": {
+      "src": "Rust library, CLI, control plane, state, trace, transport, session, command, and runtime logic.",
+      "native": "CEF native application, host shared library, C ABI, platform glue, CMake build, macOS bundle metadata.",
+      "assets/js": "Injected page runtime compiled into native header by CMake.",
+      "tests": "Rust integration tests and Fozzy scenarios.",
+      "scripts": "Install, verification, Fozzy, startup measurement, runtime header generation, host-backed smoke test."
+    },
+    "dirty_worktree_at_audit_time": [
+      "TODAYBUGS.md modified before this work",
+      ".DS_Store files untracked",
+      "native/build-xcode/ untracked",
+      "third_party/ untracked",
+      "tmp/ untracked"
+    ]
+  },
+  "crate": {
+    "package": {
+      "name": "aegis",
+      "version": "0.1.0",
+      "edition": "2024"
+    },
+    "targets": [
+      {
+        "kind": "lib",
+        "name": "aegis",
+        "path": "src/lib.rs"
+      },
+      {
+        "kind": "bin",
+        "name": "aegis",
+        "path": "src/main.rs"
+      },
+      {
+        "kind": "test",
+        "name": "runtime_flow",
+        "path": "tests/runtime_flow.rs"
+      }
+    ],
+    "dependencies": {
+      "async-stream": "SSE stream construction",
+      "axum": "HTTP API server and routing",
+      "base64": "Upload payload encoding",
+      "bincode": "Available serialization dependency",
+      "clap": "CLI parser and subcommands",
+      "futures-core": "SSE stream trait integration",
+      "libc": "Unix file locking and process/session calls",
+      "libloading": "Dynamic loading of native host library",
+      "serde": "Structured JSON data models",
+      "serde_json": "JSON protocol, API payloads, config, traces",
+      "tempfile": "Tests",
+      "thiserror": "AegisError definitions",
+      "tokio": "Async runtime, oneshot channels, timeout/sleep, net"
+    },
+    "lints": {
+      "clippy.dbg_macro": "deny",
+      "clippy.todo": "deny",
+      "clippy.unwrap_used": "deny"
+    }
+  },
+  "runtime_model": {
+    "production_rule": "One persistent serve process, one local HTTP API, one browser session per runtime by default.",
+    "modes": {
+      "headless": "Automation without a visible window.",
+      "headful": "Automation with a visible browser window."
+    },
+    "entrypoints": {
+      "human_shortcut": "aegis with no arguments opens the canonical local headful app when invoked as the installed launcher.",
+      "serve": "aegis serve starts the persistent browser runtime and HTTP control API.",
+      "client_commands": "navigate, search, and page commands call a running serve process over HTTP.",
+      "native_commands": "native status, doctor, configure, build, install, and paths inspect or build native artifacts.",
+      "trace_inspect": "trace inspect replays a deterministic trace without starting native runtime."
+    },
+    "default_addresses": {
+      "http_api": "127.0.0.1:7878",
+      "host_backed_smoke": "127.0.0.1:7881"
+    },
+    "startup_behavior": {
+      "start_url_omitted": "The runtime boots into a local no-network bootstrap page.",
+      "bootstrap_urls": [
+        "https://bootstrap.aegis/",
+        "aegis://bootstrap/",
+        "data:text/html,"
+      ],
+      "bootstrap_purpose": "Stable startup without paying network cost until explicit navigation."
+    },
+    "runtime_identity": {
+      "protocol_version": 1,
+      "crate_version_source": "env!(CARGO_PKG_VERSION)",
+      "diagnostics_source": "ServeDiagnostics in src/api/server.rs plus RuntimeStatus in src/runtime/executor.rs and HostRuntimeState in src/transport/protocol.rs"
+    }
+  },
+  "layers": [
+    {
+      "id": "rust_cli",
+      "name": "Rust CLI",
+      "primary_files": [
+        "src/main.rs"
+      ],
+      "responsibilities": [
+        "Parse user-facing commands and global flags.",
+        "Resolve BrowserConfig and transfer directories.",
+        "Start serve in foreground or detached mode.",
+        "Forward research commands to HTTP API.",
+        "Manage config, secrets, credentials, trace inspect, and native commands.",
+        "Resolve default native host library from workspace or installed app."
+      ],
+      "key_types": [
+        "Cli",
+        "Commands",
+        "TraceCommands",
+        "PageCommands",
+        "ConfigCommands",
+        "NativeCommands",
+        "BrowserModeArg",
+        "ServeRuntimeSource"
+      ]
+    },
+    {
+      "id": "rust_http_control_plane",
+      "name": "Rust HTTP Control Plane",
+      "primary_files": [
+        "src/api/server.rs"
+      ],
+      "responsibilities": [
+        "Expose Axum HTTP API.",
+        "Manage default and named runtime contexts.",
+        "Serialize runtime operations through mpsc channels.",
+        "Maintain diagnostics, readiness, doctor, telemetry, and operation failure snapshots.",
+        "Expose SSE event streams.",
+        "Auto-capture Aegis-owned credentials after username/password entry followed by submit-like command when enabled."
+      ],
+      "key_types": [
+        "ApiState",
+        "ServeRootState",
+        "MainThreadContext",
+        "ApiCommand",
+        "ManagerCommand",
+        "ServeStartupMetrics",
+        "ServeDiagnostics",
+        "RuntimeDiagnosticsResponse",
+        "RuntimeInfo",
+        "HealthResponse",
+        "AutoCredentialCapture"
+      ]
+    },
+    {
+      "id": "rust_runtime_executor",
+      "name": "Rust Runtime Executor",
+      "primary_files": [
+        "src/runtime/executor.rs",
+        "src/runtime/scheduler.rs",
+        "src/client/mod.rs"
+      ],
+      "responsibilities": [
+        "Wrap the bridge in AegisRuntime and AegisClient.",
+        "Sequence command batches and runtime events.",
+        "Apply DOM snapshots and incremental DOM mutations.",
+        "Execute wait_for and media_state locally with polling.",
+        "Refresh live page state from window.__aegis.currentPageState().",
+        "Annotate interaction command results with diagnostics from emitted events.",
+        "Record traces when enabled."
+      ],
+      "key_types": [
+        "AegisRuntime",
+        "AegisClient",
+        "ExecutionReport",
+        "RuntimeStatus",
+        "Scheduler",
+        "PageResearchData",
+        "PageBootstrapDiagnostics",
+        "MediaDiagnostics"
+      ]
+    },
+    {
+      "id": "rust_transport",
+      "name": "Rust Native Transport",
+      "primary_files": [
+        "src/transport/protocol.rs",
+        "src/transport/bridge.rs",
+        "src/host/mod.rs"
+      ],
+      "responsibilities": [
+        "Load the native host dynamic library.",
+        "Bind C ABI functions into HostFunctionTable.",
+        "Encode and decode framed protocol messages.",
+        "Invoke native functions and safely free returned buffers.",
+        "Expose LoadedAegisClient and cancellation handle."
+      ],
+      "key_types": [
+        "CefBridge",
+        "LoadedHost",
+        "LoadedAegisClient",
+        "RuntimeCancelHandle",
+        "HostFunctionTable",
+        "HostRuntimeState",
+        "MessageKind",
+        "MessageEnvelope"
+      ]
+    },
+    {
+      "id": "native_cef_host",
+      "name": "Native CEF Host",
+      "primary_files": [
+        "native/src/aegis_cef_host.cpp",
+        "native/include/aegis_cef_host.hpp",
+        "native/include/aegis_host_abi.h",
+        "native/src/aegis_protocol.cpp"
+      ],
+      "responsibilities": [
+        "Own CEF lifecycle for the host library runtime.",
+        "Create and manage browser instances and request contexts.",
+        "Run CEF message pump on the owner thread.",
+        "Route Rust protocol operations to CEF and renderer IPC.",
+        "Inject session cookies, storage, and network overrides.",
+        "Snapshot session, DOM, host state, downloads, and events.",
+        "Capture network and websocket events through DevTools Network domain.",
+        "Track downloads and emit local download events.",
+        "Expose operation stages and structured operation errors."
+      ],
+      "key_types": [
+        "AegisCefHost",
+        "BrowserContextState",
+        "AegisHostClient",
+        "AegisDevToolsObserver",
+        "OperationScope",
+        "ManagedCookie",
+        "DownloadRecord",
+        "RendererReply"
+      ]
+    },
+    {
+      "id": "native_cef_app",
+      "name": "Native CEF App and Renderer Bridge",
+      "primary_files": [
+        "native/aegis_app.cc",
+        "native/aegis_app.h",
+        "native/aegis_client.cc",
+        "native/aegis_client.h",
+        "native/aegis_messages.h",
+        "native/aegis_bootstrap.h"
+      ],
+      "responsibilities": [
+        "Configure CEF app behavior, bootstrap scheme, and preferences.",
+        "Inject the generated Aegis runtime script into renderer contexts.",
+        "Dispatch renderer operations such as ensure runtime, eval JS, snapshot DOM, drain events, and storage operations.",
+        "Handle renderer response and lifecycle process messages.",
+        "Forward CEF browser callbacks to Aegis host delegate."
+      ],
+      "key_messages": [
+        "aegis request message",
+        "aegis response message",
+        "aegis lifecycle message",
+        "context_ready lifecycle event"
+      ]
+    },
+    {
+      "id": "page_js_runtime",
+      "name": "Injected Page JavaScript Runtime",
+      "primary_files": [
+        "assets/js/aegis_runtime.js"
+      ],
+      "responsibilities": [
+        "Install window.__aegis once per page context.",
+        "Assign element IDs for the current document lifetime.",
+        "Serialize semantic DOM snapshots.",
+        "Observe DOM mutations and queue runtime events.",
+        "Resolve ID or semantic matcher targets.",
+        "Execute synthetic click, hover, set_value, set_files, press_key, scroll, drag, geometry, and eval commands.",
+        "Expose current page state, wait state, media diagnostics, bootstrap diagnostics, and page research data.",
+        "Track interaction, media, script error, and unhandled rejection logs."
+      ],
+      "public_surface": [
+        "snapshot",
+        "exec",
+        "click",
+        "hover",
+        "pressKey",
+        "setValue",
+        "setFiles",
+        "scrollToPosition",
+        "drag",
+        "geometry",
+        "drainEvents",
+        "queue",
+        "assignId",
+        "currentPageState",
+        "resolveTargetInfo",
+        "waitState",
+        "pageResearchData"
+      ]
+    },
+    {
+      "id": "platform_layer",
+      "name": "Platform Layer",
+      "primary_files": [
+        "native/aegis_platform_mac.mm",
+        "native/aegis_platform_linux.cc",
+        "native/aegis_browser_host_mac.mm",
+        "native/aegis_browser_host_mac.inc",
+        "native/process_helper_mac.cc",
+        "native/process_helper_linux.cc",
+        "native/include/aegis_platform.h"
+      ],
+      "responsibilities": [
+        "Resolve CEF platform paths.",
+        "Configure CEF settings and subprocess paths.",
+        "Run platform main entry.",
+        "Initialize app/window behavior.",
+        "Provide macOS headful browser window chrome and UI.",
+        "Handle helper process integration."
+      ],
+      "platforms": [
+        "macOS",
+        "Linux"
+      ]
+    }
+  ],
+  "data_models": {
+    "browser_config": {
+      "source": "src/browser.rs",
+      "fields": {
+        "mode": "headless or headful",
+        "start_url": "optional initial URL",
+        "download_dir": "optional browser download directory",
+        "upload_dir": "optional upload staging directory"
+      }
+    },
+    "commands": {
+      "source": "src/commands/command.rs",
+      "target_forms": [
+        {
+          "form": "id",
+          "shape": {
+            "id": "NodeId"
+          }
+        },
+        {
+          "form": "match",
+          "shape": {
+            "match": "CommandMatcher"
+          }
+        }
+      ],
+      "matcher_fields": [
+        "selector",
+        "test_id",
+        "role",
+        "name",
+        "label",
+        "control_type",
+        "tag",
+        "text",
+        "placeholder",
+        "href_contains",
+        "actionable",
+        "disabled",
+        "exact"
+      ],
+      "command_variants": [
+        "click",
+        "hover",
+        "set_value",
+        "set_files",
+        "press_key",
+        "wait_for",
+        "scroll",
+        "drag",
+        "geometry",
+        "media_state",
+        "eval"
+      ],
+      "result_shape": {
+        "ok": "boolean",
+        "value": "optional JSON value",
+        "error": "optional string"
+      }
+    },
+    "dom": {
+      "sources": [
+        "src/dom/node.rs",
+        "src/dom/tree.rs",
+        "src/dom/diff.rs",
+        "assets/js/aegis_runtime.js"
+      ],
+      "snapshot": {
+        "nodes": "Array<DomNode>"
+      },
+      "node": {
+        "id": "u64 document-lifetime node id",
+        "tag": "lowercase HTML tag",
+        "attrs": "allowlisted string attributes plus live value for form elements",
+        "text": "optional normalized/truncated text",
+        "semantic": "optional DomNodeSemantics",
+        "children": "child NodeId array"
+      },
+      "semantics": {
+        "role": "optional ARIA/implicit role",
+        "name": "optional accessible-ish name",
+        "label": "associated label where available",
+        "control_type": "input/control classification",
+        "actionable": "true when actions are available and not hidden control",
+        "disabled": "disabled or aria-disabled",
+        "visible": "computed visibility and nonzero geometry",
+        "actions": "click/open/submit/type/focus/hover/press_key"
+      },
+      "mutation_variants": [
+        "upsert",
+        "remove",
+        "set_text",
+        "set_attr",
+        "set_children"
+      ]
+    },
+    "events": {
+      "source": "src/events/stream.rs",
+      "event_categories": [
+        "dom_mutation",
+        "navigation",
+        "network",
+        "download",
+        "websocket",
+        "log"
+      ],
+      "runtime_event_variants": [
+        "DomMutation",
+        "Navigation",
+        "Network",
+        "Download",
+        "WebSocketOpen",
+        "WebSocketHandshake",
+        "WebSocketFrame",
+        "WebSocketClose",
+        "Log",
+        "Unknown"
+      ],
+      "retention": {
+        "default_max_retained_events": 10000,
+        "gap_detection": "EventReadWindow reports gap_detected when requested sequence is older than retained history."
+      },
+      "sequencing": {
+        "source": "src/runtime/scheduler.rs",
+        "properties": [
+          "batch ids start at 1",
+          "event sequences start at 1",
+          "synthetic timestamps start at 1 and increment per event in Scheduler"
+        ]
+      }
+    },
+    "session_state": {
+      "source": "src/session/cookies.rs",
+      "fields": {
+        "cookies": "Array<Cookie>",
+        "local_storage": "map string to string",
+        "session_storage": "map string to string",
+        "network_overrides": "Array<NetworkOverride>"
+      },
+      "validation": [
+        "Cookie names must not be empty.",
+        "Cookie domains must not be empty.",
+        "Network override headers must not be empty."
+      ],
+      "normalization": [
+        "Expired cookies are dropped.",
+        "Cookie domain is trimmed, leading dot removed, lowercased.",
+        "Cookie path defaults to /.",
+        "Duplicate cookies are deduplicated by normalized name, domain, and path with last value winning."
+      ]
+    },
+    "trace_file": {
+      "sources": [
+        "src/trace/recorder.rs",
+        "src/trace/replayer.rs",
+        "src/transport/protocol.rs"
+      ],
+      "fields": {
+        "protocol_version": 1,
+        "browser_config": "BrowserConfig",
+        "initial_session": "optional SessionState",
+        "batches": "Array<TraceBatchRecord>"
+      },
+      "replay_semantics": [
+        "Last non-null response snapshot becomes final snapshot.",
+        "A navigation event without a snapshot clears final snapshot.",
+        "Emitted events are replayed into an unbounded EventStream."
+      ]
+    }
+  },
+  "protocols": {
+    "rust_to_native_frame": {
+      "sources": [
+        "src/transport/protocol.rs",
+        "native/src/aegis_protocol.cpp"
+      ],
+      "magic": "AEGS",
+      "version": 1,
+      "header_length_bytes": 16,
+      "layout": [
+        {
+          "offset": 0,
+          "length": 4,
+          "field": "magic"
+        },
+        {
+          "offset": 4,
+          "length": 2,
+          "field": "protocol_version_le_u16"
+        },
+        {
+          "offset": 6,
+          "length": 2,
+          "field": "message_kind_le_u16"
+        },
+        {
+          "offset": 8,
+          "length": 8,
+          "field": "json_body_length_le_u64"
+        },
+        {
+          "offset": 16,
+          "length": "body_length",
+          "field": "JSON MessageEnvelope"
+        }
+      ],
+      "message_kinds": {
+        "1": "EnsureRuntime",
+        "2": "EvalJs",
+        "3": "SendBatch",
+        "4": "SnapshotDom",
+        "5": "InjectSession",
+        "6": "SnapshotSession",
+        "7": "DrainEvents",
+        "8": "Navigate",
+        "9": "SnapshotHostState",
+        "10": "ActivateBrowser"
+      },
+      "validation": [
+        "Frame must be at least 16 bytes.",
+        "Magic must equal AEGS.",
+        "Version must equal 1.",
+        "Kind must match expected kind.",
+        "Body length must exactly match frame length.",
+        "Envelope kind must match expected kind."
+      ]
+    },
+    "c_abi": {
+      "source": "native/include/aegis_host_abi.h",
+      "status_enum": {
+        "AEGIS_HOST_OK": 0,
+        "AEGIS_HOST_ERROR": 1
+      },
+      "buffer_shape": {
+        "ptr": "uint8_t*",
+        "len": "size_t"
+      },
+      "exports": [
+        "aegis_create_host",
+        "aegis_last_error_message",
+        "aegis_destroy_host",
+        "aegis_get_function_table"
+      ],
+      "function_table": [
+        "ensure_runtime",
+        "eval_js",
+        "send_batch",
+        "snapshot_dom",
+        "inject_session",
+        "snapshot_session",
+        "drain_events",
+        "navigate",
+        "snapshot_host_state",
+        "activate_browser",
+        "pump",
+        "request_cancel",
+        "free_buffer"
+      ],
+      "rust_safety_boundaries": [
+        "src/host/mod.rs loads symbols with libloading.",
+        "src/transport/bridge.rs rejects null host handles.",
+        "src/transport/bridge.rs rejects null or zero-length invalid buffers.",
+        "src/transport/bridge.rs caps native returned buffers at 64 MiB.",
+        "Native buffers are freed through HostFunctionTable.free_buffer."
+      ]
+    },
+    "native_renderer_ipc": {
+      "sources": [
+        "native/aegis_app.cc",
+        "native/aegis_messages.h",
+        "native/src/aegis_cef_host.cpp"
+      ],
+      "direction": "Browser process sends operations to renderer main frame; renderer replies with success boolean and JSON/string body.",
+      "lifecycle_signal": "Renderer sends context_ready after runtime script injection.",
+      "operations": [
+        "ensure runtime",
+        "eval js",
+        "send batch",
+        "snapshot dom",
+        "drain events",
+        "snapshot storage",
+        "inject storage"
+      ]
+    }
+  },
+  "http_api": {
+    "source": "src/api/server.rs",
+    "framework": "axum",
+    "default_context_routes": [
+      "GET /",
+      "GET /manifest",
+      "GET /version",
+      "GET /healthz",
+      "GET /readyz",
+      "GET /doctor",
+      "GET /runtime",
+      "POST /runtime/cancel",
+      "POST /browsers/{browser_id}/activate",
+      "GET /session",
+      "POST /session",
+      "POST /session/save",
+      "POST /session/load",
+      "POST /search",
+      "POST /navigate",
+      "POST /execute",
+      "GET /page",
+      "GET /page/text",
+      "GET /page/markdown",
+      "GET /page/actions",
+      "GET /page/forms",
+      "GET /page/links",
+      "GET /page/headings",
+      "POST /page/find",
+      "POST /page/open-link",
+      "GET /dom",
+      "GET /events",
+      "GET /downloads",
+      "GET /events/live",
+      "POST /trace/enable"
+    ],
+    "context_management_routes": [
+      "GET /contexts",
+      "POST /contexts",
+      "GET /contexts/{context_id}",
+      "DELETE /contexts/{context_id}"
+    ],
+    "context_scoped_routes": [
+      "GET /contexts/{context_id}/healthz",
+      "GET /contexts/{context_id}/readyz",
+      "GET /contexts/{context_id}/doctor",
+      "GET /contexts/{context_id}/runtime",
+      "POST /contexts/{context_id}/runtime/cancel",
+      "POST /contexts/{context_id}/browsers/{browser_id}/activate",
+      "GET /contexts/{context_id}/session",
+      "POST /contexts/{context_id}/session",
+      "POST /contexts/{context_id}/session/save",
+      "POST /contexts/{context_id}/session/load",
+      "POST /contexts/{context_id}/search",
+      "POST /contexts/{context_id}/navigate",
+      "POST /contexts/{context_id}/execute",
+      "GET /contexts/{context_id}/page",
+      "GET /contexts/{context_id}/page/text",
+      "GET /contexts/{context_id}/page/markdown",
+      "GET /contexts/{context_id}/page/actions",
+      "GET /contexts/{context_id}/page/forms",
+      "GET /contexts/{context_id}/page/links",
+      "GET /contexts/{context_id}/page/headings",
+      "POST /contexts/{context_id}/page/find",
+      "POST /contexts/{context_id}/page/open-link",
+      "GET /contexts/{context_id}/dom",
+      "GET /contexts/{context_id}/events",
+      "GET /contexts/{context_id}/downloads",
+      "GET /contexts/{context_id}/events/live",
+      "POST /contexts/{context_id}/trace/enable"
+    ],
+    "request_bodies": {
+      "NavigateBody": {
+        "url": "string"
+      },
+      "SearchBody": {
+        "query": "string",
+        "engine": "optional google|bing|duckduckgo default"
+      },
+      "ExecuteBody": {
+        "commands": "Array<Command>"
+      },
+      "TraceBody": {
+        "path": "PathBuf"
+      },
+      "CreateContextBody": {
+        "id": "optional string",
+        "profile": "optional string",
+        "seed_from_context": "optional context id",
+        "mode": "optional BrowserMode",
+        "start_url": "optional string",
+        "download_dir": "optional PathBuf",
+        "upload_dir": "optional PathBuf"
+      },
+      "PageFindBody": {
+        "text": "string",
+        "exact": "boolean default false"
+      },
+      "PageOpenLinkBody": {
+        "text": "string",
+        "exact": "boolean default false",
+        "href_contains": "optional string",
+        "index": "optional usize"
+      }
+    },
+    "event_streaming": {
+      "route": "GET /events/live and /contexts/{context_id}/events/live",
+      "transport": "Server-Sent Events",
+      "initial_event": "ready",
+      "data_event": "runtime_events",
+      "keep_alive_seconds": 15,
+      "poll_ms_default": 100,
+      "poll_ms_min": 25,
+      "poll_ms_max": 1000
+    },
+    "readiness_policy": [
+      "Command readiness must be true.",
+      "Inspectable DOM gate must pass unless document has not loaded, module scripts are absent, or synthetic shell is active.",
+      "Failures return structured ApiErrorBody with code and suggested action."
+    ]
+  },
+  "state_and_persistence": {
+    "root_resolution": {
+      "source": "src/state.rs",
+      "priority": [
+        "$AEGIS_HOME",
+        "$HOME/.aegis"
+      ]
+    },
+    "canonical_tree": {
+      "~/.aegis/settings/agent.json": "Agent settings, version and default_profile.",
+      "~/.aegis/settings/runtime.json": "Runtime settings, bootstrap_page and persistent mode flags.",
+      "~/.aegis/settings/credentials.json": "Aegis-owned credential capture settings, including auto_store.",
+      "~/.aegis/profiles/<profile>/session.json": "Versioned SessionState.",
+      "~/.aegis/secrets/profiles/<profile>/secrets.json": "Versioned profile secrets, including credentials entries.",
+      "~/.aegis/files/downloads": "Default browser download directory.",
+      "~/.aegis/files/uploads": "Default upload staging directory.",
+      "~/.aegis/runtime/serve-headless/instances": "Runtime instance scope for headless serve.",
+      "~/.aegis/runtime/serve-headful/instances": "Runtime instance scope for headful serve.",
+      "~/.aegis/logs": "Detached serve logs from CLI."
+    },
+    "file_safety": [
+      "JSON files are created with default payloads.",
+      "Corrupt JSON files are quarantined with .corrupt.<timestamp> suffix and replaced.",
+      "Writes use temporary files, sync, atomic rename, and directory sync on Unix.",
+      "State file locks use .lock files and flock on Unix.",
+      "State files are secured to owner-only 0600 permissions on Unix."
+    ],
+    "profiles": {
+      "default_profile": "default",
+      "name_validation": "ASCII alphanumeric plus '.', '-', '_' only",
+      "session_profile_version": 3
+    },
+    "credentials": {
+      "settings_default": {
+        "version": 1,
+        "auto_store": true
+      },
+      "storage": "secrets.credentials.entries inside profile secrets JSON",
+      "entry_fields": [
+        "origin",
+        "username",
+        "password",
+        "username_field",
+        "password_field",
+        "form_label",
+        "created_at_ms",
+        "updated_at_ms"
+      ],
+      "auto_capture": "src/api/server.rs tracks set_value username/password fields and submit-like click/enter, then writes credentials through AegisSecretStore when enabled.",
+      "non_goal": "Aegis does not read or write Chrome/Brave cookies, login databases, or Safe Storage entries."
+    },
+    "transfers": {
+      "source": "src/transfers.rs",
+      "downloads": "Browser downloads go to BrowserConfig.download_dir or ~/.aegis/files/downloads.",
+      "uploads": "SetFiles stages files into BrowserConfig.upload_dir or ~/.aegis/files/uploads, sanitizes names, encodes bytes as base64 payloads, then injects File objects in JS."
+    }
+  },
+  "native_build_and_install": {
+    "source_files": [
+      "src/native.rs",
+      "native/CMakeLists.txt",
+      "install.sh",
+      "scripts/install_local_release.sh",
+      "scripts/verify_local_release.sh"
+    ],
+    "targets": {
+      "aegis_native": "Standalone CEF app executable or macOS app bundle.",
+      "aegis_host": "Shared library dynamically loaded by Rust serve runtime.",
+      "aegis_shared_support": "Static support library for shared native components.",
+      "aegis_helper": "CEF helper executable."
+    },
+    "generated_files": {
+      "aegis_runtime_script.h": "Generated from assets/js/aegis_runtime.js by scripts/generate_runtime_header.py."
+    },
+    "cef_roots": {
+      "macos": "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64",
+      "linux": "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_linux64"
+    },
+    "install_locations": {
+      "macos_app": "~/Applications/Aegis.app",
+      "macos_bundled_cli": "~/Applications/Aegis.app/Contents/MacOS/aegis_cli",
+      "linux_app": "~/.local/share/aegis/Aegis",
+      "linux_bundled_cli": "~/.local/share/aegis/Aegis/bin/aegis_cli",
+      "launcher": "~/.local/bin/aegis or ~/bin/aegis"
+    },
+    "macos_signing": {
+      "env": [
+        "AEGIS_CODESIGN_IDENTITY",
+        "AEGIS_CODESIGN_OPTIONS",
+        "AEGIS_CODESIGN_ENTITLEMENTS"
+      ],
+      "default_entitlements": "native/mac/aegis.entitlements",
+      "verification": [
+        "codesign --verify --strict",
+        "spctl --assess when a real signing identity is configured"
+      ]
+    },
+    "native_doctor": {
+      "purpose": [
+        "report platform",
+        "report CEF SDK paths",
+        "report workspace artifacts",
+        "report canonical install paths",
+        "report missing required tools",
+        "report configure/build/install readiness"
+      ]
+    }
+  },
+  "major_flows": [
+    {
+      "id": "serve_startup",
+      "name": "Start Persistent Runtime",
+      "steps": [
+        "CLI resolves transfer paths and BrowserConfig.",
+        "CLI resolves host library from --host-lib, workspace release runtime, or installed app.",
+        "serve_main_thread on macOS or async serve on non-macOS starts HTTP API and runtime context.",
+        "LoadedHost dynamically loads aegis_host and calls aegis_create_host with BrowserConfig JSON.",
+        "AegisCefHost starts or attaches to initialized CEF on the process main thread.",
+        "Native creates browser with start URL or bootstrap URL.",
+        "AegisApp injects kAegisRuntimeScript into renderer context.",
+        "Renderer sends lifecycle context_ready.",
+        "Rust snapshots HostRuntimeState and starts pumping.",
+        "Readiness and diagnostics become available through /healthz, /readyz, /doctor, and /runtime."
+      ]
+    },
+    {
+      "id": "navigate",
+      "name": "Navigate",
+      "steps": [
+        "Client sends POST /navigate or /contexts/{id}/navigate with url.",
+        "API sends ApiCommand::Navigate through context channel.",
+        "AegisRuntime.ensure_runtime_bootstrapped refreshes host state.",
+        "CefBridge encodes Navigate request with optional network capture flag.",
+        "Native AegisCefHost decodes request, optionally enables DevTools Network capture, calls NavigateTo.",
+        "Native returns current URL plus navigation event and local events.",
+        "Rust applies events, updates current_url, refreshes host/live state, records trace if enabled.",
+        "API returns Vec<SequencedEvent>."
+      ]
+    },
+    {
+      "id": "execute_commands",
+      "name": "Execute Command Batch",
+      "steps": [
+        "Client sends POST /execute with Array<Command>.",
+        "AegisRuntime assigns batch id.",
+        "SetFiles commands are prepared by staging files and adding base64 UploadFilePayloads.",
+        "Bridge-compatible commands are flushed to native SendBatch.",
+        "wait_for and media_state are executed locally in Rust between bridge flushes.",
+        "Native sends SendBatch to renderer operation.",
+        "JS exec resolves targets, performs actions, returns per-command results and _aegis event spans.",
+        "JS queued events and native local events are merged into response.",
+        "Rust applies DOM snapshot or mutations, sequences events, annotates interaction diagnostics, refreshes live state, and records trace."
+      ]
+    },
+    {
+      "id": "semantic_targeting",
+      "name": "Semantic Target Resolution",
+      "steps": [
+        "A command may target a raw node id or a CommandMatcher.",
+        "JS matcher search optionally scopes by CSS selector.",
+        "Each candidate descriptor is built from allowlisted attrs, text, semantics, visibility, and actions.",
+        "Candidate scoring rewards exact/partial field matches, visibility, actionability, action targetability, and native control tags.",
+        "Ambiguous equal top scores throw an error.",
+        "Rust has a parallel matcher implementation for snapshot-side reasoning and credential capture."
+      ]
+    },
+    {
+      "id": "session_inject_snapshot",
+      "name": "Session Injection and Snapshot",
+      "steps": [
+        "SessionState validates in Rust.",
+        "Bridge sends InjectSession to native.",
+        "Native replaces network overrides and cookies, then stores pending storage injection payload.",
+        "If renderer is ready, native invokes renderer storage injection; otherwise storage injection is deferred.",
+        "SnapshotSession ensures runtime ready, captures document.cookie, asks renderer for storage, appends cookies and network overrides, and returns SessionState."
+      ]
+    },
+    {
+      "id": "page_research",
+      "name": "Page Research Data",
+      "steps": [
+        "API page endpoints call runtime.page_research_data().",
+        "Runtime refreshes live state.",
+        "Bridge evals JSON.stringify(window.__aegis.pageResearchData()).",
+        "JS extracts title, URL, canonical URL, visible text, content scopes, main content selector, headings, links, primary links, controls, primary controls, forms, overlays, semantic summary, page type, blockers, not-found signals, suggested search query, and suggested next actions.",
+        "API transforms this into text, markdown, actions, forms, links, headings, find, and open-link responses."
+      ]
+    },
+    {
+      "id": "events_live",
+      "name": "Live Event Streaming",
+      "steps": [
+        "Client opens /events/live or context-scoped equivalent.",
+        "Server emits ready SSE event.",
+        "Loop sends ApiCommand::Events with current since sequence.",
+        "Runtime enables network event capture, drains pending events, and reads EventStream.",
+        "API filters events by category or exact event name.",
+        "Server emits runtime_events SSE only when events exist or a retention gap is detected."
+      ]
+    },
+    {
+      "id": "trace_record_replay",
+      "name": "Trace Recording and Replay",
+      "steps": [
+        "POST /trace/enable sets TraceRecorder with path and current BrowserConfig.",
+        "Session injection stores initial session into recorder.",
+        "Each navigation or command batch records request, response, and sequenced emitted events.",
+        "Trace inspect loads file and replays final snapshot plus event stream without native runtime."
+      ]
+    },
+    {
+      "id": "download_tracking",
+      "name": "Download Tracking",
+      "steps": [
+        "Native AegisClient receives OnBeforeDownload.",
+        "AegisCefHost chooses unique target under download_dir.",
+        "DownloadRecord is inserted into BrowserContextState and emitted as a download RuntimeEvent.",
+        "OnDownloadUpdated updates received bytes, total bytes, percent, interrupt reason, complete/canceled state, and emits another download event.",
+        "HostRuntimeState exposes downloads; API exposes /downloads."
+      ]
+    }
+  ],
+  "module_index": {
+    "src/lib.rs": "Public module declarations and re-exports for core Aegis types.",
+    "src/main.rs": "CLI command surface, serve startup, detached serve, native/config/page command handlers, raw HTTP client for CLI calls.",
+    "src/api/server.rs": "Axum API, runtime context manager, diagnostics, readiness, API errors, page helpers, credential auto-capture.",
+    "src/browser.rs": "BrowserMode and BrowserConfig.",
+    "src/client/mod.rs": "Thin AegisClient wrapper around AegisRuntime.",
+    "src/runtime/executor.rs": "AegisRuntime state machine, command execution, live state, wait_for, media state, trace hooks.",
+    "src/runtime/scheduler.rs": "Monotonic ids for batches, events, and synthetic timestamps.",
+    "src/transport/protocol.rs": "Framed AEGS protocol, message kinds, wire response, host runtime state, trace file models.",
+    "src/transport/bridge.rs": "C ABI bridge wrapper, AegisError, HostFunctionTable, native invocation and buffer decoding.",
+    "src/host/mod.rs": "Dynamic library loading and LoadedAegisClient facade.",
+    "src/commands/command.rs": "Command, target, matcher, upload payload, and result schemas.",
+    "src/commands/matcher.rs": "Rust-side DOM matcher and target scoring.",
+    "src/commands/encoder.rs": "JSON batch encoder helper.",
+    "src/dom/node.rs": "DOM snapshot data model.",
+    "src/dom/tree.rs": "Mutable DOM tree with mutation application.",
+    "src/dom/diff.rs": "Snapshot diffing into DomMutation operations.",
+    "src/events/stream.rs": "RuntimeEvent enum, serialization/deserialization, event stream retention and filtering windows.",
+    "src/session/cookies.rs": "Cookie and SessionState validation/normalization.",
+    "src/session/profile.rs": "Versioned profile session load/save and repair.",
+    "src/session/storage.rs": "StorageArea and NetworkOverride.",
+    "src/state.rs": "Canonical ~/.aegis layout, defaults, repairs, locking, atomic writes, permissions.",
+    "src/config_store.rs": "Settings and secrets stores, credential entries and operations.",
+    "src/transfers.rs": "Upload/download directory resolution and upload staging.",
+    "src/native.rs": "Native status, doctor, configure, build, install, artifact path resolution, signing helpers.",
+    "src/trace/recorder.rs": "TraceRecorder writer/loader.",
+    "src/trace/replayer.rs": "Trace replay into final DOM snapshot and EventStream.",
+    "native/src/aegis_cef_host.cpp": "CEF host shared library implementation and C ABI dispatch.",
+    "native/src/aegis_protocol.cpp": "Native implementation of AEGS framed protocol.",
+    "native/aegis_app.cc": "CEF app, renderer operation dispatcher, bootstrap handler, runtime script injection.",
+    "native/aegis_client.cc": "CEF client callbacks and delegate forwarding.",
+    "native/aegis_native_main.cc": "Standalone app and embedded command entrypoint.",
+    "native/aegis_platform_mac.mm": "macOS CEF and platform integration.",
+    "native/aegis_platform_linux.cc": "Linux CEF and platform integration.",
+    "native/aegis_browser_host_mac.inc": "macOS headful browser window chrome implementation.",
+    "assets/js/aegis_runtime.js": "Injected semantic page runtime."
+  },
+  "quality_and_verification": {
+    "rust_tests": {
+      "file": "tests/runtime_flow.rs",
+      "coverage_themes": [
+        "command JSON shape",
+        "protocol round trips",
+        "DOM diffing",
+        "session validation",
+        "event filtering and retention gaps",
+        "unknown event forward compatibility",
+        "network/websocket/download/host state models",
+        "trace recording and replay",
+        "browser config serialization"
+      ]
+    },
+    "fozzy": {
+      "base_dir": ".fozzy",
+      "canonical_script": "scripts/run_fozzy_full.sh",
+      "seed": 424242,
+      "doctor_runs": 5,
+      "scenarios": [
+        {
+          "path": "tests/aegis_core.fozzy.json",
+          "purpose": "cargo test and cargo clippy deterministic gate"
+        },
+        {
+          "path": "tests/aegis_host_backed.fozzy.json",
+          "purpose": "host-backed smoke via scripts/host_backed_smoke.sh"
+        },
+        {
+          "path": "tests/aegis_native_doctor.fozzy.json",
+          "purpose": "native doctor, paths, and status commands"
+        },
+        {
+          "path": "tests/aegis_native_server_main_state_config_executor_explore.fozzy.json",
+          "purpose": "distributed explore coverage hint scenario"
+        },
+        {
+          "path": "tests/aegis_native_server_main_state_config_executor_host_memory_fuzz.fozzy.json",
+          "purpose": "host memory/fuzz signal scenario"
+        },
+        {
+          "path": "tests/aegis_native_server_main_state_config_executor_fail_shrink.fozzy.json",
+          "purpose": "intentional shrink surface"
+        }
+      ],
+      "full_gate_commands": [
+        "fozzy env --strict",
+        "fozzy usage --strict",
+        "fozzy version --strict",
+        "fozzy map suites --root . --scenario-root tests --profile pedantic --strict",
+        "fozzy validate <scenario> --strict",
+        "fozzy doctor --deep --scenario tests/aegis_core.fozzy.json --runs 5 --seed 424242 --strict",
+        "fozzy doctor --deep --scenario tests/aegis_host_backed.fozzy.json --runs 5 --seed 424242 --strict --proc-backend host --http-backend host --fs-backend host",
+        "fozzy test tests/aegis_core.fozzy.json tests/aegis_native_doctor.fozzy.json tests/aegis_native_server_main_state_config_executor_host_memory_fuzz.fozzy.json --det --strict-verify --seed 424242",
+        "fozzy test tests/aegis_host_backed.fozzy.json --det --strict-verify --seed 424242 --proc-backend host --http-backend host --fs-backend host",
+        "fozzy run tests/aegis_host_backed.fozzy.json --det --strict-verify --seed 424242 --proc-backend host --http-backend host --fs-backend host --record .fozzy/aegis/host.det.trace.fozzy",
+        "fozzy trace verify .fozzy/aegis/host.det.trace.fozzy --strict-verify --proc-backend host --http-backend host --fs-backend host",
+        "fozzy replay .fozzy/aegis/host.det.trace.fozzy --strict-verify --proc-backend host --http-backend host --fs-backend host",
+        "fozzy ci .fozzy/aegis/host.det.trace.fozzy --strict-verify --proc-backend host --http-backend host --fs-backend host"
+      ]
+    },
+    "host_backed_smoke": {
+      "script": "scripts/host_backed_smoke.sh",
+      "behavior": [
+        "Resolves workspace or installed host library from native doctor.",
+        "Builds native release if workspace host exists but app executable is missing.",
+        "Starts local HTTP fixture with index, download payload, and wav media.",
+        "Starts Aegis serve against the host library.",
+        "Waits for /healthz command_ready and bridge_healthy.",
+        "Exercises host-backed runtime behavior and records trace path .fozzy/host_backed_trace.fozzy."
+      ]
+    }
+  },
+  "graph_model": {
+    "nodes": [
+      {
+        "id": "user_or_agent",
+        "label": "User or Agent",
+        "kind": "actor"
+      },
+      {
+        "id": "aegis_cli",
+        "label": "aegis CLI",
+        "kind": "rust_process"
+      },
+      {
+        "id": "http_api",
+        "label": "Local HTTP API",
+        "kind": "rust_control_plane"
+      },
+      {
+        "id": "context_manager",
+        "label": "Runtime Context Manager",
+        "kind": "rust_state_machine"
+      },
+      {
+        "id": "aegis_runtime",
+        "label": "AegisRuntime",
+        "kind": "rust_state_machine"
+      },
+      {
+        "id": "cef_bridge",
+        "label": "CefBridge",
+        "kind": "rust_ffi_bridge"
+      },
+      {
+        "id": "native_host_library",
+        "label": "aegis_host dynamic library",
+        "kind": "native_shared_library"
+      },
+      {
+        "id": "cef_host",
+        "label": "AegisCefHost",
+        "kind": "native_runtime"
+      },
+      {
+        "id": "cef_browser",
+        "label": "CEF Browser",
+        "kind": "browser_engine"
+      },
+      {
+        "id": "renderer",
+        "label": "Renderer Main Frame",
+        "kind": "browser_renderer"
+      },
+      {
+        "id": "page_js_runtime",
+        "label": "window.__aegis",
+        "kind": "injected_javascript"
+      },
+      {
+        "id": "page_dom",
+        "label": "Real Page DOM",
+        "kind": "web_page"
+      },
+      {
+        "id": "aegis_state",
+        "label": "~/.aegis State",
+        "kind": "filesystem"
+      },
+      {
+        "id": "trace_file",
+        "label": "Trace File",
+        "kind": "filesystem_artifact"
+      },
+      {
+        "id": "devtools_network",
+        "label": "DevTools Network Domain",
+        "kind": "browser_instrumentation"
+      },
+      {
+        "id": "fozzy",
+        "label": "Fozzy Determinism Engine",
+        "kind": "verification"
+      }
+    ],
+    "edges": [
+      {
+        "from": "user_or_agent",
+        "to": "aegis_cli",
+        "label": "runs commands"
+      },
+      {
+        "from": "user_or_agent",
+        "to": "http_api",
+        "label": "HTTP control requests"
+      },
+      {
+        "from": "aegis_cli",
+        "to": "http_api",
+        "label": "raw local HTTP for navigate/search/page"
+      },
+      {
+        "from": "http_api",
+        "to": "context_manager",
+        "label": "routes default/context-scoped operations"
+      },
+      {
+        "from": "context_manager",
+        "to": "aegis_runtime",
+        "label": "mpsc ApiCommand serialization"
+      },
+      {
+        "from": "aegis_runtime",
+        "to": "cef_bridge",
+        "label": "typed bridge calls"
+      },
+      {
+        "from": "cef_bridge",
+        "to": "native_host_library",
+        "label": "C ABI function table"
+      },
+      {
+        "from": "native_host_library",
+        "to": "cef_host",
+        "label": "CefHost implementation"
+      },
+      {
+        "from": "cef_host",
+        "to": "cef_browser",
+        "label": "CEF lifecycle and browser operations"
+      },
+      {
+        "from": "cef_browser",
+        "to": "renderer",
+        "label": "main frame render process"
+      },
+      {
+        "from": "renderer",
+        "to": "page_js_runtime",
+        "label": "runtime script injection"
+      },
+      {
+        "from": "page_js_runtime",
+        "to": "page_dom",
+        "label": "DOM inspection, events, and synthetic input"
+      },
+      {
+        "from": "cef_host",
+        "to": "devtools_network",
+        "label": "Network.enable and event observer"
+      },
+      {
+        "from": "aegis_runtime",
+        "to": "trace_file",
+        "label": "record batches and events"
+      },
+      {
+        "from": "http_api",
+        "to": "aegis_state",
+        "label": "profile/session/config/secret persistence"
+      },
+      {
+        "from": "fozzy",
+        "to": "aegis_cli",
+        "label": "scenario execution"
+      },
+      {
+        "from": "fozzy",
+        "to": "trace_file",
+        "label": "record, verify, replay, ci"
+      }
+    ]
+  },
+  "visualization_guidance": {
+    "recommended_diagrams": [
+      {
+        "title": "Aegis Layer Cake",
+        "focus": "Rust control plane -> C ABI/protocol -> native CEF host -> renderer JS runtime -> real DOM"
+      },
+      {
+        "title": "Command Execution Flow",
+        "focus": "POST /execute through ApiCommand, AegisRuntime, CefBridge, SendBatch, window.__aegis.exec, events, trace"
+      },
+      {
+        "title": "State Ownership",
+        "focus": "Separate ~/.aegis durable state from Chromium/CEF runtime substrate"
+      },
+      {
+        "title": "Protocol Boundary",
+        "focus": "AEGS frame, C ABI function table, message kinds"
+      },
+      {
+        "title": "Page Semantic Runtime",
+        "focus": "DOM snapshot, matcher scoring, action execution, mutation/media/log queues, page research"
+      },
+      {
+        "title": "Verification Pipeline",
+        "focus": "cargo test/clippy, Fozzy scenarios, host-backed smoke, trace verify/replay/ci"
+      }
+    ],
+    "important_distinctions_to_show": [
+      "HTTP API is local control surface; C ABI is internal Rust-native bridge.",
+      "Native CEF host owns real browser and OS/platform integration.",
+      "Injected JS runtime owns semantic page interpretation and command execution.",
+      "Rust runtime owns sequencing, diagnostics aggregation, trace recording, and API responses.",
+      "Aegis-owned ~/.aegis JSON state is canonical persistence; Chromium profile internals are not."
+    ],
+    "suggested_color_groups": {
+      "rust": "control plane, runtime, state, trace",
+      "native": "CEF host, platform glue, C ABI",
+      "browser": "CEF browser, renderer, DevTools",
+      "page": "window.__aegis, DOM, media",
+      "storage": "~/.aegis, traces, uploads/downloads",
+      "verification": "Fozzy and tests"
+    }
+  },
+  "source_evidence": {
+    "files_read_or_inspected": [
+      "README.md",
+      "docs/agent-control.md",
+      "Cargo.toml",
+      "fozzy.toml",
+      "src/lib.rs",
+      "src/main.rs",
+      "src/api/server.rs",
+      "src/browser.rs",
+      "src/client/mod.rs",
+      "src/runtime/executor.rs",
+      "src/runtime/scheduler.rs",
+      "src/transport/protocol.rs",
+      "src/transport/bridge.rs",
+      "src/host/mod.rs",
+      "src/commands/command.rs",
+      "src/commands/matcher.rs",
+      "src/commands/encoder.rs",
+      "src/dom/node.rs",
+      "src/dom/tree.rs",
+      "src/dom/diff.rs",
+      "src/events/stream.rs",
+      "src/session/cookies.rs",
+      "src/session/profile.rs",
+      "src/session/storage.rs",
+      "src/state.rs",
+      "src/config_store.rs",
+      "src/transfers.rs",
+      "src/native.rs",
+      "src/trace/recorder.rs",
+      "src/trace/replayer.rs",
+      "native/CMakeLists.txt",
+      "native/include/aegis_host_abi.h",
+      "native/include/aegis_protocol.hpp",
+      "native/include/aegis_cef_host.hpp",
+      "native/include/aegis_platform.h",
+      "native/src/aegis_protocol.cpp",
+      "native/src/aegis_cef_host.cpp",
+      "native/aegis_app.cc",
+      "native/aegis_client.cc",
+      "native/aegis_native_main.cc",
+      "native/aegis_platform_mac.mm",
+      "native/aegis_platform_linux.cc",
+      "assets/js/aegis_runtime.js",
+      "tests/runtime_flow.rs",
+      "tests/aegis_core.fozzy.json",
+      "tests/aegis_host_backed.fozzy.json",
+      "tests/aegis_native_doctor.fozzy.json",
+      "tests/aegis_native_server_main_state_config_executor_explore.fozzy.json",
+      "tests/aegis_native_server_main_state_config_executor_fail_shrink.fozzy.json",
+      "tests/aegis_native_server_main_state_config_executor_host_memory_fuzz.fozzy.json",
+      "scripts/run_fozzy_full.sh",
+      "scripts/host_backed_smoke.sh",
+      "scripts/verify_local_release.sh",
+      "scripts/generate_runtime_header.py",
+      "install.sh"
+    ],
+    "tool_observations": {
+      "aegis_cli_available": true,
+      "aegis_path": "/Users/deepsaint/.local/bin/aegis",
+      "fozzy_available": true,
+      "fozzy_path": "/Users/deepsaint/.local/bin/fozzy",
+      "fz_available": true,
+      "fz_path": "/Users/deepsaint/.local/bin/fz",
+      "rg_available": true
+    },
+    "line_count_snapshot": {
+      "total_audited_source_approx": 28275,
+      "largest_files": [
+        {
+          "path": "src/api/server.rs",
+          "lines": 6495
+        },
+        {
+          "path": "native/src/aegis_cef_host.cpp",
+          "lines": 3505
+        },
+        {
+          "path": "assets/js/aegis_runtime.js",
+          "lines": 2816
+        },
+        {
+          "path": "src/runtime/executor.rs",
+          "lines": 1545
+        },
+        {
+          "path": "src/main.rs",
+          "lines": 1374
+        },
+        {
+          "path": "src/native.rs",
+          "lines": 1234
+        }
+      ]
+    }
+  },
+  "maintenance_notes": [
+    "Update protocol sections whenever MessageKind, HostFunctionTable, or frame format changes.",
+    "Update HTTP route arrays whenever router() in src/api/server.rs changes.",
+    "Update JS runtime public_surface and command behavior whenever assets/js/aegis_runtime.js changes.",
+    "Update state_and_persistence whenever src/state.rs, src/config_store.rs, or src/session/profile.rs changes.",
+    "Update native_build_and_install whenever native/CMakeLists.txt or src/native.rs changes.",
+    "Regenerate diagrams from graph_model rather than manually reconstructing the architecture."
+  ]
+}

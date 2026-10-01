@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "aegis-architecture-unmocked-host-artifacts",
+  "steps": [
+    {
+      "type": "proc_spawn",
+      "name": "verify-generated-architecture-on-host",
+      "cmd": "python3",
+      "args": ["scripts/render_architecture.py", "--verify"],
+      "expect_exit": 0,
+      "expect_stdout": "{\"formats\": [\"svg\", \"png\", \"pdf\"], \"graph_nodes\": 16, \"ok\": true, \"source_hash_matches\": true}\n"
+    }
+  ]
+}
